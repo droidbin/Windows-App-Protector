@@ -2,6 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
+$appVersion = (Get-Content -LiteralPath (Join-Path $root "VERSION") -Raw).Trim()
 
 $candidateRoots = @(
     (Join-Path $root "src\WinUI3\bin"),
@@ -34,7 +35,9 @@ $payloadDir = Join-Path $buildDir "payload"
 $distDir = Join-Path $root "dist\installer"
 $setupSource = Join-Path $root "src\Installer\Setup.cs"
 $manifest = Join-Path $root "src\Installer\app.manifest"
+$icon = Join-Path $root "src\WinUI3\Assets\AppIcon.ico"
 $setupExe = Join-Path $distDir "Setup.exe"
+$versionedDistDir = Join-Path $root ("dist\releases\" + $appVersion)
 $zipPath = Join-Path $buildDir "payload.zip"
 
 Remove-Item -LiteralPath $buildDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -56,8 +59,11 @@ if ($LASTEXITCODE -ne 0) {
 
 Copy-Item -Path (Join-Path $payloadSource "*") -Destination $payloadDir -Recurse -Force
 Copy-Item -LiteralPath $serviceExe -Destination $payloadDir -Force
+$payloadAssetsDir = Join-Path $payloadDir "Assets"
+New-Item -ItemType Directory -Path $payloadAssetsDir -Force | Out-Null
+Copy-Item -LiteralPath $icon -Destination (Join-Path $payloadAssetsDir "AppIcon.ico") -Force
 
-& $csc /nologo /target:winexe /optimize+ /win32manifest:$manifest /reference:System.IO.Compression.FileSystem.dll /out:$setupExe $setupSource
+& $csc /nologo /target:winexe /optimize+ /win32manifest:$manifest /win32icon:$icon /reference:System.IO.Compression.FileSystem.dll /out:$setupExe $setupSource
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
@@ -82,3 +88,6 @@ finally {
 }
 
 Write-Host "Created $setupExe"
+New-Item -ItemType Directory -Path $versionedDistDir -Force | Out-Null
+Copy-Item -LiteralPath $setupExe -Destination (Join-Path $versionedDistDir "Setup.exe") -Force
+Write-Host "Preserved versioned installer at $(Join-Path $versionedDistDir 'Setup.exe')"

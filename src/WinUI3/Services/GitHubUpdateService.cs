@@ -2,6 +2,7 @@ using System.IO.Compression;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Text.Json;
 
 namespace WindowsAppProtector.Services;
@@ -54,9 +55,14 @@ public sealed class GitHubUpdateService
             GetString(root, "name"),
             GetString(root, "html_url"),
             asset.Value.Name,
-            asset.Value.DownloadUrl);
+            asset.Value.DownloadUrl,
+            asset.Value.Sha256);
 
-        return latestVersion.CompareTo(NormalizeVersion(CurrentVersion)) > 0
+        var versionComparison = NormalizeVersion(latestVersion).CompareTo(NormalizeVersion(CurrentVersion));
+        var isCurrentPrerelease = Assembly.GetExecutingAssembly()
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+            ?.Contains('-', StringComparison.Ordinal) == true;
+        return versionComparison > 0 || (versionComparison == 0 && isCurrentPrerelease)
             ? UpdateCheckResult.Available(release)
             : UpdateCheckResult.NotAvailable(release);
     }
@@ -85,6 +91,21 @@ public sealed class GitHubUpdateService
             await using var downloadStream = await response.Content.ReadAsStreamAsync(cancellationToken);
             await using var fileStream = File.Create(assetPath);
             await downloadStream.CopyToAsync(fileStream, cancellationToken);
+        }
+
+        if (!IsValidSha256(release.Sha256))
+        {
+            throw new InvalidDataException("릴리스에 유효한 SHA-256 검증 정보가 없습니다. 설치를 중단했습니다.");
+        }
+
+        await using (var assetStream = File.OpenRead(assetPath))
+        {
+            var actualHash = await SHA256.HashDataAsync(assetStream, cancellationToken);
+            if (!CryptographicOperations.FixedTimeEquals(actualHash, Convert.FromHexString(release.Sha256)))
+            {
+                File.Delete(assetPath);
+                throw new InvalidDataException("다운로드한 업데이트 파일의 SHA-256이 릴리스 정보와 일치하지 않습니다.");
+            }
         }
 
         if (Path.GetExtension(assetPath).Equals(".exe", StringComparison.OrdinalIgnoreCase))
@@ -145,18 +166,19 @@ public sealed class GitHubUpdateService
         }
     }
 
-    private static (string Name, string DownloadUrl)? FindInstallerAsset(JsonElement root)
+    private static (string Name, string DownloadUrl, string Sha256)? FindInstallerAsset(JsonElement root)
     {
         if (!root.TryGetProperty("assets", out var assets) || assets.ValueKind != JsonValueKind.Array)
         {
             return null;
         }
 
-        (string Name, string DownloadUrl)? zipAsset = null;
+        (string Name, string DownloadUrl, string Sha256)? zipAsset = null;
         foreach (var asset in assets.EnumerateArray())
         {
             var name = GetString(asset, "name");
             var downloadUrl = GetString(asset, "browser_download_url");
+            var digest = GetString(asset, "digest");
             if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(downloadUrl))
             {
                 continue;
@@ -164,16 +186,29 @@ public sealed class GitHubUpdateService
 
             if (name.Equals("Setup.exe", StringComparison.OrdinalIgnoreCase))
             {
-                return (name, downloadUrl);
+                return (name, downloadUrl, NormalizeSha256(digest));
             }
 
             if (name.Equals("WindowsAppProtector.zip", StringComparison.OrdinalIgnoreCase))
             {
-                zipAsset = (name, downloadUrl);
+                zipAsset = (name, downloadUrl, NormalizeSha256(digest));
             }
         }
 
         return zipAsset;
+    }
+
+    private static string NormalizeSha256(string digest)
+    {
+        const string prefix = "sha256:";
+        return digest.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+            ? digest[prefix.Length..]
+            : string.Empty;
+    }
+
+    private static bool IsValidSha256(string value)
+    {
+        return value.Length == 64 && value.All(Uri.IsHexDigit);
     }
 
     private static string GetString(JsonElement element, string propertyName)
@@ -218,7 +253,8 @@ public sealed record GitHubReleaseInfo(
     string ReleaseName,
     string ReleasePageUrl,
     string AssetName,
-    string AssetDownloadUrl);
+    string AssetDownloadUrl,
+    string Sha256);
 
 public sealed class UpdateCheckResult
 {

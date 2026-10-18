@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Data;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Markup;
 using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -38,6 +39,7 @@ public sealed class MainWindow : Window
     private const int OfnPathMustExist = 0x00000800;
     private const int OfnFileMustExist = 0x00001000;
     private const int OfnExplorer = 0x00080000;
+    private const int OfnAllowMultiSelect = 0x00000200;
     private const int OfnEnableSizing = 0x00800000;
     private const uint NimAdd = 0x00000000;
     private const uint NimModify = 0x00000001;
@@ -45,11 +47,14 @@ public sealed class MainWindow : Window
     private const uint NifMessage = 0x00000001;
     private const uint NifIcon = 0x00000002;
     private const uint NifTip = 0x00000004;
+    private const uint ImageIcon = 1;
+    private const uint LrLoadFromFile = 0x0010;
+    private const uint LrDefaultSize = 0x0040;
     private const string MessageWindowClassName = "WindowsAppProtectorMessageWindow";
     private static readonly IntPtr HwndMessage = new(-3);
     private static readonly IntPtr IdiApplication = new(32512);
 
-    private readonly ListView appList = new() { SelectionMode = ListViewSelectionMode.Single };
+    private readonly ListView appList = new() { SelectionMode = ListViewSelectionMode.Multiple };
     private readonly Dictionary<int, string> registeredHotkeys = new();
     private readonly HashSet<IntPtr> hiddenProtectedWindows = new();
     private readonly GitHubUpdateService updateService = new();
@@ -62,6 +67,8 @@ public sealed class MainWindow : Window
     private bool isCheckingForUpdates;
     private bool isAutoLockCheckRunning;
     private bool trayIconAdded;
+    private bool ownsTrayIconHandle;
+    private IntPtr trayIconHandle;
     private IntPtr hwnd;
     private AppWindow? appWindow;
     private SettingsWindow? settingsWindow;
@@ -105,62 +112,70 @@ public sealed class MainWindow : Window
     {
         var root = new Grid
         {
-            Background = Brush(0xF6, 0xF7, 0xF9),
-            Padding = new Thickness(18),
+            Background = Brush(0xF4, 0xF7, 0xF5),
+            Padding = new Thickness(24),
         };
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
-        var commandBarHost = new Border
+        var header = new Grid { ColumnSpacing = 16, Margin = new Thickness(0, 0, 0, 20) };
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var heading = new StackPanel { Spacing = 3, VerticalAlignment = VerticalAlignment.Center };
+        heading.Children.Add(new TextBlock
         {
-            Background = Brush(0xEA, 0xEE, 0xF3),
-            BorderBrush = Brush(0xD7, 0xDE, 0xE8),
-            BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(6),
-            Padding = new Thickness(6, 2, 6, 2),
-        };
-
-        var commandBar = new CommandBar
+            Text = "Windows App Protector",
+            FontSize = 24,
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            Foreground = Brush(0x1C, 0x2B, 0x25),
+        });
+        var subtitle = new TextBlock
         {
-            DefaultLabelPosition = CommandBarDefaultLabelPosition.Right,
-            Background = new SolidColorBrush(Colors.Transparent),
+            Text = "앱 보호 관리",
+            FontSize = 13,
+            Foreground = Brush(0x65, 0x75, 0x6D),
         };
+        heading.Children.Add(subtitle);
+        header.Children.Add(heading);
 
-        var settingsButton = new AppBarButton { Label = "\uC124\uC815" };
-        settingsButton.Click += Settings_Click;
-
-        var updateButton = new AppBarButton { Label = "\uC5C5\uB370\uC774\uD2B8 \uD655\uC778" };
-        updateButton.Click += CheckUpdate_Click;
-
-        var exitButton = new AppBarButton { Label = "\uC885\uB8CC" };
-        exitButton.Click += (_, _) => ExitApplication();
-
-        commandBar.PrimaryCommands.Add(settingsButton);
-        commandBar.SecondaryCommands.Add(updateButton);
-        commandBar.SecondaryCommands.Add(exitButton);
-        commandBarHost.Child = commandBar;
-        Grid.SetRow(commandBarHost, 0);
-        root.Children.Add(commandBarHost);
-
-        var toolbar = new StackPanel
+        var windowCommands = new StackPanel
         {
             Orientation = Orientation.Horizontal,
-            Spacing = 8,
-            Margin = new Thickness(0, 14, 0, 10),
+            Spacing = 4,
+            VerticalAlignment = VerticalAlignment.Center,
         };
-        toolbar.Children.Add(CreateButton("\uC571 \uCD94\uAC00", AddApp_Click));
-        toolbar.Children.Add(CreateButton("\uC124\uCE58 \uC571 \uCD94\uAC00", AddInstalledApp_Click));
-        toolbar.Children.Add(CreateButton("\uC0AD\uC81C", RemoveApp_Click));
-        toolbar.Children.Add(CreateButton("\uC120\uD0DD \uC571 \uC7A0\uAE08/\uD574\uC81C", ToggleApp_Click));
-        toolbar.Children.Add(CreateButton("\uBAA9\uB85D \uC7A0\uAE08", LockList_Click));
-        toolbar.Children.Add(CreateButton("\uBAA9\uB85D \uD574\uC81C", UnlockList_Click));
+        windowCommands.Children.Add(CreateIconButton("업데이트 확인", "\uE72C", CheckUpdate_Click));
+        windowCommands.Children.Add(CreateIconButton("설정", "\uE713", Settings_Click));
+        windowCommands.Children.Add(CreateIconButton("종료", "\uE8BB", (_, _) => ExitApplication()));
+        Grid.SetColumn(windowCommands, 1);
+        header.Children.Add(windowCommands);
+        Grid.SetRow(header, 0);
+        root.Children.Add(header);
+
+        var toolbar = new Grid
+        {
+            Margin = new Thickness(0, 0, 0, 14),
+        };
+        toolbar.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        toolbar.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, VerticalAlignment = VerticalAlignment.Center };
+        actions.Children.Add(CreateActionButton("파일 추가", "\uE710", AddApp_Click, true));
+        actions.Children.Add(CreateActionButton("설치 앱", "\uE7F4", AddInstalledApp_Click));
+        actions.Children.Add(CreateActionButton("삭제", "\uE74D", RemoveApp_Click));
+        actions.Children.Add(CreateActionButton("잠금 전환", "\uE72E", ToggleApp_Click));
+        actions.Children.Add(CreateActionButton("전체 잠금", "\uE72E", LockList_Click));
+        actions.Children.Add(CreateActionButton("전체 해제", "\uE785", UnlockList_Click));
+        Grid.SetRow(actions, 0);
+        toolbar.Children.Add(actions);
 
         var searchBox = new TextBox
         {
-            Width = 260,
-            PlaceholderText = "\uAC80\uC0C9",
+            PlaceholderText = "앱 이름 또는 경로 검색",
+            VerticalAlignment = VerticalAlignment.Center,
+            Height = 38,
+            Margin = new Thickness(0, 8, 0, 0),
         };
         searchBox.SetBinding(TextBox.TextProperty, new Binding
         {
@@ -169,30 +184,50 @@ public sealed class MainWindow : Window
             Mode = BindingMode.TwoWay,
             UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged,
         });
+        Grid.SetRow(searchBox, 1);
         toolbar.Children.Add(searchBox);
 
         Grid.SetRow(toolbar, 1);
         root.Children.Add(toolbar);
 
-        var listHost = new Border
+        var listHost = new Grid
         {
             Background = new SolidColorBrush(Colors.White),
-            BorderBrush = Brush(0xD9, 0xDF, 0xE8),
-            BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(6),
-            Padding = new Thickness(8),
         };
 
         appList.ItemsSource = ViewModel.Apps;
         appList.SelectionChanged += AppList_SelectionChanged;
-        listHost.Child = appList;
+        appList.Background = new SolidColorBrush(Colors.Transparent);
+        appList.BorderThickness = new Thickness(0);
+        appList.Padding = new Thickness(8, 4, 8, 4);
+        appList.ItemTemplate = (DataTemplate)XamlReader.Load("""
+            <DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation">
+                <Border Padding="12,9">
+                    <Grid ColumnSpacing="18" MinHeight="58">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Spacing="3" VerticalAlignment="Center">
+                            <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold" Foreground="#1C2B25" TextTrimming="CharacterEllipsis" />
+                            <TextBlock Text="{Binding Path}" FontSize="12" Foreground="#68766F" TextTrimming="CharacterEllipsis" />
+                        </StackPanel>
+                        <Border Grid.Column="1" Background="#E6F2EC" CornerRadius="4" Padding="10,5" VerticalAlignment="Center">
+                            <TextBlock Text="{Binding Status}" FontSize="12" FontWeight="SemiBold" Foreground="#28664D" />
+                        </Border>
+                    </Grid>
+                </Border>
+            </DataTemplate>
+            """);
+        listHost.Children.Add(appList);
         Grid.SetRow(listHost, 2);
         root.Children.Add(listHost);
 
         var statusText = new TextBlock
         {
-            Foreground = Brush(0x4C, 0x57, 0x66),
-            Margin = new Thickness(2, 10, 0, 0),
+            Foreground = Brush(0x65, 0x75, 0x6D),
+            FontSize = 12,
+            Margin = new Thickness(2, 12, 0, 0),
         };
         statusText.SetBinding(TextBlock.TextProperty, new Binding
         {
@@ -206,14 +241,34 @@ public sealed class MainWindow : Window
         return root;
     }
 
-    private static Button CreateButton(string text, RoutedEventHandler handler)
+    private static Button CreateActionButton(string text, string glyph, RoutedEventHandler handler, bool primary = false)
+    {
+        var content = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 7, VerticalAlignment = VerticalAlignment.Center };
+        content.Children.Add(new FontIcon { Glyph = glyph, FontSize = 14 });
+        content.Children.Add(new TextBlock { Text = text, VerticalAlignment = VerticalAlignment.Center });
+        var button = new Button
+        {
+            Content = content,
+            MinHeight = 38,
+            Padding = new Thickness(11, 6, 11, 6),
+            Background = primary ? Brush(0x1F, 0x6B, 0x50) : new SolidColorBrush(Colors.Transparent),
+            Foreground = primary ? new SolidColorBrush(Colors.White) : Brush(0x2D, 0x3B, 0x34),
+        };
+        button.Click += handler;
+        return button;
+    }
+
+    private static Button CreateIconButton(string label, string glyph, RoutedEventHandler handler)
     {
         var button = new Button
         {
-            Content = text,
-            MinWidth = 78,
-            Padding = new Thickness(12, 6, 12, 6),
+            Content = new FontIcon { Glyph = glyph, FontSize = 16 },
+            Width = 40,
+            Height = 40,
+            Padding = new Thickness(0),
+            Background = new SolidColorBrush(Colors.Transparent),
         };
+        ToolTipService.SetToolTip(button, label);
         button.Click += handler;
         return button;
     }
@@ -260,8 +315,7 @@ public sealed class MainWindow : Window
     {
         try
         {
-            var path = ShowExecutableOpenDialog();
-            if (!string.IsNullOrWhiteSpace(path))
+            foreach (var path in ShowExecutableOpenDialog())
             {
                 await ViewModel.AddAppAsync(path);
             }
@@ -273,14 +327,15 @@ public sealed class MainWindow : Window
         }
     }
 
-    private string? ShowExecutableOpenDialog()
+    private IReadOnlyList<string> ShowExecutableOpenDialog()
     {
         EnsureMainWindowInterop();
-        var buffer = Marshal.AllocCoTaskMem(4096 * sizeof(char));
+        const int bufferCharacters = 32768;
+        var buffer = Marshal.AllocCoTaskMem(bufferCharacters * sizeof(char));
 
         try
         {
-            var emptyBuffer = new byte[4096 * sizeof(char)];
+            var emptyBuffer = new byte[bufferCharacters * sizeof(char)];
             Marshal.Copy(emptyBuffer, 0, buffer, emptyBuffer.Length);
 
             var dialog = new OpenFileName
@@ -289,15 +344,22 @@ public sealed class MainWindow : Window
                 hwndOwner = hwnd,
                 lpstrFilter = "\uC2E4\uD589 \uD30C\uC77C (*.exe)\0*.exe\0\uBAA8\uB4E0 \uD30C\uC77C (*.*)\0*.*\0",
                 lpstrFile = buffer,
-                nMaxFile = 4096,
+                nMaxFile = bufferCharacters,
                 lpstrTitle = "\uC571 \uCD94\uAC00",
                 lpstrDefExt = "exe",
-                Flags = OfnExplorer | OfnFileMustExist | OfnPathMustExist | OfnNoChangeDir | OfnEnableSizing,
+                Flags = OfnExplorer | OfnAllowMultiSelect | OfnFileMustExist | OfnPathMustExist | OfnNoChangeDir | OfnEnableSizing,
             };
 
             if (GetOpenFileName(dialog))
             {
-                return Marshal.PtrToStringUni(buffer);
+                var values = (Marshal.PtrToStringUni(buffer, bufferCharacters) ?? string.Empty)
+                    .Split('\0', StringSplitOptions.RemoveEmptyEntries);
+                if (values.Length <= 1)
+                {
+                    return values;
+                }
+
+                return values.Skip(1).Select(fileName => Path.Combine(values[0], fileName)).ToArray();
             }
 
             var error = CommDlgExtendedError();
@@ -306,7 +368,7 @@ public sealed class MainWindow : Window
                 throw new InvalidOperationException($"\uD30C\uC77C \uC120\uD0DD \uCC3D \uC624\uB958: 0x{error:X}");
             }
 
-            return null;
+            return Array.Empty<string>();
         }
         finally
         {
@@ -328,7 +390,7 @@ public sealed class MainWindow : Window
 
             var list = new ListView
             {
-                SelectionMode = ListViewSelectionMode.Single,
+                SelectionMode = ListViewSelectionMode.Multiple,
                 MaxHeight = 420,
                 ItemsSource = apps,
             };
@@ -344,9 +406,12 @@ public sealed class MainWindow : Window
             };
 
             var result = await dialog.ShowAsync();
-            if (result == ContentDialogResult.Primary && list.SelectedItem is PackagedAppInfo selected)
+            if (result == ContentDialogResult.Primary && list.SelectedItems.Count > 0)
             {
-                await ViewModel.AddPackagedAppAsync(selected);
+                foreach (var selected in list.SelectedItems.OfType<PackagedAppInfo>().ToArray())
+                {
+                    await ViewModel.AddPackagedAppAsync(selected);
+                }
             }
             else
             {
@@ -551,14 +616,20 @@ public sealed class MainWindow : Window
 
     private void RemoveTrayIcon()
     {
-        if (!trayIconAdded)
+        if (trayIconAdded)
         {
-            return;
+            var data = CreateTrayIconData();
+            Shell_NotifyIcon(NimDelete, ref data);
+            trayIconAdded = false;
         }
 
-        var data = CreateTrayIconData();
-        Shell_NotifyIcon(NimDelete, ref data);
-        trayIconAdded = false;
+        if (ownsTrayIconHandle && trayIconHandle != IntPtr.Zero)
+        {
+            DestroyIcon(trayIconHandle);
+        }
+
+        trayIconHandle = IntPtr.Zero;
+        ownsTrayIconHandle = false;
     }
 
     private NotifyIconData CreateTrayIconData()
@@ -570,9 +641,33 @@ public sealed class MainWindow : Window
             uID = 1,
             uFlags = NifMessage | NifIcon | NifTip,
             uCallbackMessage = WmTrayIcon,
-            hIcon = LoadIcon(IntPtr.Zero, IdiApplication),
+            hIcon = GetTrayIconHandle(),
             szTip = "Windows App Protector",
         };
+    }
+
+    private IntPtr GetTrayIconHandle()
+    {
+        if (trayIconHandle != IntPtr.Zero)
+        {
+            return trayIconHandle;
+        }
+
+        var iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico");
+        trayIconHandle = LoadImage(
+            IntPtr.Zero,
+            iconPath,
+            ImageIcon,
+            0,
+            0,
+            LrLoadFromFile | LrDefaultSize);
+        ownsTrayIconHandle = trayIconHandle != IntPtr.Zero;
+        if (!ownsTrayIconHandle)
+        {
+            trayIconHandle = LoadIcon(IntPtr.Zero, IdiApplication);
+        }
+
+        return trayIconHandle;
     }
 
     private void ExitApplication()
@@ -693,10 +788,10 @@ public sealed class MainWindow : Window
 
     private static string GetCurrentVersionText()
     {
-        var version = Assembly.GetExecutingAssembly().GetName().Version;
-        return version is null
-            ? "0.0.0"
-            : $"{version.Major}.{version.Minor}.{Math.Max(version.Build, 0)}";
+        var assembly = Assembly.GetExecutingAssembly();
+        return assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+            ?? assembly.GetName().Version?.ToString(3)
+            ?? "0.0.0";
     }
 
     private static string QuoteArgument(string value)
@@ -1096,6 +1191,12 @@ public sealed class MainWindow : Window
         }
 
         appWindow = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(hwnd));
+        var iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico");
+        if (File.Exists(iconPath))
+        {
+            appWindow.SetIcon(iconPath);
+        }
+
         appWindow.Closing += AppWindow_Closing;
     }
 
@@ -1306,6 +1407,18 @@ public sealed class MainWindow : Window
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr LoadIcon(IntPtr hInstance, IntPtr lpIconName);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr LoadImage(
+        IntPtr hInstance,
+        string name,
+        uint type,
+        int cx,
+        int cy,
+        uint flags);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool DestroyIcon(IntPtr hIcon);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern ushort RegisterClassEx(ref WindowClassEx lpWndClass);

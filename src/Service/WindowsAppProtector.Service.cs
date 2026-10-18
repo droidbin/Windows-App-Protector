@@ -163,7 +163,7 @@ internal sealed class ProtectionWorker : IDisposable
 
     private AppConfig LoadConfig()
     {
-        string selectedPath = FindNewestConfigPath();
+        string selectedPath = GetSharedConfigPath();
         if (string.IsNullOrEmpty(selectedPath) || !File.Exists(selectedPath))
         {
             return null;
@@ -176,64 +176,9 @@ internal sealed class ProtectionWorker : IDisposable
         }
     }
 
-    private string FindNewestConfigPath()
+    private string GetSharedConfigPath()
     {
-        string newestPath = string.Empty;
-        DateTime newestWriteTime = DateTime.MinValue;
-
-        foreach (string path in EnumerateConfigPaths())
-        {
-            try
-            {
-                if (!File.Exists(path))
-                {
-                    continue;
-                }
-
-                DateTime writeTime = File.GetLastWriteTimeUtc(path);
-                if (writeTime > newestWriteTime)
-                {
-                    newestWriteTime = writeTime;
-                    newestPath = path;
-                }
-            }
-            catch
-            {
-            }
-        }
-
-        return newestPath;
-    }
-
-    private IEnumerable<string> EnumerateConfigPaths()
-    {
-        yield return configPath;
-
-        string usersRoot = Path.Combine(Path.GetPathRoot(Environment.SystemDirectory), "Users");
-        if (!Directory.Exists(usersRoot))
-        {
-            yield break;
-        }
-
-        string[] profileDirectories;
-        try
-        {
-            profileDirectories = Directory.GetDirectories(usersRoot);
-        }
-        catch
-        {
-            yield break;
-        }
-
-        foreach (string profileDirectory in profileDirectories)
-        {
-            yield return Path.Combine(
-                profileDirectory,
-                "AppData",
-                "Roaming",
-                "WindowsAppProtector.WinUI",
-                "config.json");
-        }
+        return File.Exists(configPath) ? configPath : string.Empty;
     }
 
     private void SyncRules(IEnumerable<ProtectedApp> apps)

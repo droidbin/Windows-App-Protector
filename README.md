@@ -2,7 +2,7 @@
 
 WinUI 3 기반 Windows 앱 실행 차단 도구입니다. 보호 목록에 등록한 `.exe` 파일을 Windows IFEO(Image File Execution Options) 규칙 또는 창 감시 방식으로 차단합니다.
 
-현재 배포 버전: `1.1.11`
+현재 작업 버전: `1.2.0-beta.4` (안정판 배포 아님)
 
 ## 배포 파일
 
@@ -12,12 +12,14 @@ WinUI 3 기반 Windows 앱 실행 차단 도구입니다. 보호 목록에 등�
 dist\installer\Setup.exe
 ```
 
+버전별 보존용 빌드 산출물은 `dist\releases\<버전>`에 별도로 저장됩니다.
+
 사용자는 `Setup.exe`만 실행하면 됩니다. 설치 프로그램은 관리자 권한을 요청한 뒤 다음 작업을 자동으로 처리합니다.
 
 - 실행 중인 기존 Windows App Protector 프로세스 종료
 - 이전 버전에서 남긴 관리형 IFEO 차단 규칙 정리
 - 구버전 설정 폴더 `%APPDATA%\WindowsAppProtector` 삭제
-- `C:\Program Files\Windows App Protector`에 WinUI 앱 설치
+- `C:\Program Files\Windows App Protector <버전>`에 WinUI 앱 설치 (기존 버전 폴더 유지)
 - 선택 시 바탕화면 및 시작 메뉴 바로가기 생성
 - Windows 앱 제거 목록 등록
 - 설치 완료 후 앱 실행
@@ -40,10 +42,21 @@ dist\installer\Setup.exe
 
 자동 업데이트는 GitHub Releases의 최신 릴리즈를 기준으로 동작합니다.
 
-- 릴리즈 태그는 `v1.1.9`처럼 앱 버전과 맞춥니다.
-- 릴리즈 자산에는 `Setup.exe`를 첨부하는 것을 권장합니다.
+- 안정판 릴리즈 태그는 `V1.2.0`처럼 앱 버전과 맞춥니다.
+- 베타 빌드는 `1.2.0-beta.N`으로 표기하고 로컬 또는 검증용 클라우드 빌드로만 배포합니다. 베타 검증이 완료되기 전에는 GitHub Releases에 게시하지 않습니다.
+- 새 버전은 버전별 설치 폴더와 GitHub Release 태그/자산으로 관리하며, 기존 버전의 설치 폴더와 릴리스는 자동으로 덮어쓰거나 삭제하지 않습니다.
+- 안정판을 게시하기 전 Windows 빌드, 자동 업데이트 해시 검증, 설치/업그레이드 및 재부팅 동작을 확인합니다.
+- 릴리즈 자산에는 `Setup.exe`와 `WindowsAppProtector.zip`을 첨부합니다. 자동 업데이트는 GitHub 릴리스 자산의 SHA-256 digest를 확인합니다.
 - `Setup.exe`가 없으면 `WindowsAppProtector.zip` 안의 `Setup.exe`를 찾아 설치합니다.
 - private 저장소를 사용할 경우 `WINDOWS_APP_PROTECTOR_GITHUB_TOKEN` 환경 변수 또는 `%PROGRAMDATA%\Windows App Protector\github-token.txt`에 GitHub 토큰을 넣어야 합니다.
+
+## 베타 및 안정판 운영
+
+- 작업은 현재 안정판에서 분기한 `codex/` 또는 `beta/` 작업 브랜치에서 진행합니다.
+- 변경 사항은 로컬 또는 클라우드 Windows 빌드에서 검증하고, 베타 버전 식별자와 검증 결과를 기록합니다.
+- 검증 전에는 안정판 태그, GitHub Release, 설치 파일을 게시하지 않습니다.
+- 안정화 시 기본 브랜치에 병합한 커밋에서 버전과 설치 파일을 빌드하고, 산출물 SHA-256 및 설치/업그레이드 결과를 확인한 다음 GitHub Release를 게시합니다.
+- GitHub Actions의 Windows 빌드 검증은 자동 릴리스 게시를 수행하지 않습니다.
 
 ## 주요 기능
 
@@ -59,6 +72,9 @@ dist\installer\Setup.exe
 - X 버튼 클릭 시 백그라운드 숨김 아이콘으로 전환
 - 프로그램 종료 메뉴 선택 시 백그라운드 프로세스까지 종료
 - Windows Service 기반 보호 규칙 감시 및 복구
+- ProgramData 설정은 관리자와 SYSTEM만 수정할 수 있으며, 서비스는 이 신뢰 경로만 읽음
+- PIN 해시는 PBKDF2-SHA256 및 고정 시간 비교로 확인
+- 앱 실행 파일, 창/작업 표시줄, 시스템 트레이 및 설치 프로그램에 방패형 아이콘 적용
 - 설정 저장 위치: `%APPDATA%\WindowsAppProtector.WinUI`
 - 서비스 감시 설정 위치: `%PROGRAMDATA%\Windows App Protector\config.json`
 - Windows App SDK 2.0.1 기반 WinUI 3 앱

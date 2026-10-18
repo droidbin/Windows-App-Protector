@@ -13,6 +13,8 @@ $zipPath = Join-Path $root "dist\WindowsAppProtector.zip"
 $setupExe = Join-Path $root "dist\installer\Setup.exe"
 $uninstallSource = Join-Path $root "src\Installer\Uninstall.bat"
 $readmeSource = Join-Path $root "src\Installer\README.txt"
+$appVersion = (Get-Content -LiteralPath (Join-Path $root "VERSION") -Raw).Trim()
+$versionedDistDir = Join-Path $root ("dist\releases\" + $appVersion)
 
 if (!(Test-Path $setupExe)) {
     throw "Setup.exe not found: $setupExe"
@@ -28,4 +30,8 @@ Copy-Item -LiteralPath $readmeSource -Destination (Join-Path $packageDir "README
 
 Compress-Archive -Path (Join-Path $packageDir "*") -DestinationPath $zipPath -Force
 
+New-Item -ItemType Directory -Path $versionedDistDir -Force | Out-Null
+Copy-Item -LiteralPath $zipPath -Destination (Join-Path $versionedDistDir "WindowsAppProtector.zip") -Force
+
 Write-Host "Created $zipPath"
+Write-Host "Preserved versioned release files at $versionedDistDir"

@@ -1,10 +1,13 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Threading;
 using Microsoft.Win32;
 
@@ -12,7 +15,7 @@ internal static class Setup
 {
     private static readonly byte[] Marker = System.Text.Encoding.ASCII.GetBytes("WAPZIP01");
     private const string AppName = "Windows App Protector";
-    private const string AppVersion = "1.1.11";
+    private const string AppVersion = "1.2.0-beta.4";
     private const string ExeName = "WindowsAppProtector.WinUI.exe";
     private const string ServiceExeName = "WindowsAppProtector.Service.exe";
     private const string ServiceName = "WindowsAppProtectorService";
@@ -56,14 +59,14 @@ internal static class Setup
 
             Directory.CreateDirectory(installDir);
             Directory.CreateDirectory(dataDir);
-            GrantUsersModify(dataDir);
             EnsureSharedConfigFile(dataDir);
+            SecureDataDirectory(dataDir);
 
             string zipPath = Path.Combine(Path.GetTempPath(), "WindowsAppProtector.Payload.zip");
             ExtractEmbeddedPayload(zipPath);
             ZipFile.ExtractToDirectory(zipPath, installDir);
             File.Delete(zipPath);
-            TryDeleteDirectory(oldInstallDir);
+            // Keep the previous same-version installation as a recoverable local copy.
 
             string targetPath = Path.Combine(installDir, ExeName);
             bool createShortcuts = AskCreateShortcuts();
@@ -219,14 +222,14 @@ internal static class Setup
             }
         }
 
-        return Path.Combine(programFilesDir, AppName);
+        return Path.Combine(programFilesDir, AppName + " " + AppVersion);
     }
 
     private static string NormalizeInstallDirectory(string value, string programFilesDir)
     {
         if (string.IsNullOrWhiteSpace(value))
         {
-            return Path.Combine(programFilesDir, AppName);
+            return Path.Combine(programFilesDir, AppName + " " + AppVersion);
         }
 
         return Path.GetFullPath(value.Trim().Trim('"'));
@@ -284,9 +287,77 @@ internal static class Setup
         }
     }
 
-    private static void GrantUsersModify(string path)
+    private static void SecureDataDirectory(string path)
     {
-        RunHidden("icacls.exe", "\"" + path + "\" /inheritance:e /grant *S-1-5-32-545:(OI)(CI)M /grant *S-1-5-11:(OI)(CI)M /T /C");
+        if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new IOException("\uC124\uC815 \uD3F4\uB354\uAC00 \uC2EC\uBCFC\uB9AD \uB610\uB294 \uC7AC\uBD84\uC11D \uD56D\uBAA9\uC785\uB2C8\uB2E4.");
+        }
+
+        var targets = new List<string> { path };
+        var pendingDirectories = new Queue<string>();
+        pendingDirectories.Enqueue(path);
+        while (pendingDirectories.Count > 0)
+        {
+            var directory = pendingDirectories.Dequeue();
+            foreach (var entry in Directory.GetFileSystemEntries(directory))
+            {
+                if ((File.GetAttributes(entry) & FileAttributes.ReparsePoint) != 0)
+                {
+                    throw new IOException("\uC124\uC815 \uD3F4\uB354\uC5D0 \uC2EC\uBCFC\uB9AD \uB610\uB294 \uC7AC\uBD84\uC11D \uD56D\uBAA9\uC774 \uC788\uC5B4 \uAD8C\uD55C\uC744 \uC548\uC804\uD558\uAC8C \uC81C\uD55C\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
+                }
+
+                targets.Add(entry);
+                if ((File.GetAttributes(entry) & FileAttributes.Directory) != 0)
+                {
+                    pendingDirectories.Enqueue(entry);
+                }
+            }
+        }
+
+        var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+        foreach (var target in targets)
+        {
+            var isDirectory = (File.GetAttributes(target) & FileAttributes.Directory) != 0;
+            FileSystemSecurity security = isDirectory
+                ? (FileSystemSecurity)new DirectoryInfo(target).GetAccessControl(AccessControlSections.Access)
+                : new FileInfo(target).GetAccessControl(AccessControlSections.Access);
+            security.SetAccessRuleProtection(true, false);
+            var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier));
+            foreach (FileSystemAccessRule rule in rules)
+            {
+                if (!rule.IdentityReference.Equals(administrators) && !rule.IdentityReference.Equals(system))
+                {
+                    security.RemoveAccessRuleSpecific(rule);
+                }
+            }
+
+            var inheritance = isDirectory
+                ? InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit
+                : InheritanceFlags.None;
+            security.SetAccessRule(new FileSystemAccessRule(
+                administrators,
+                FileSystemRights.FullControl,
+                inheritance,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+            security.SetAccessRule(new FileSystemAccessRule(
+                system,
+                FileSystemRights.FullControl,
+                inheritance,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+
+            if (isDirectory)
+            {
+                new DirectoryInfo(target).SetAccessControl((DirectorySecurity)security);
+            }
+            else
+            {
+                new FileInfo(target).SetAccessControl((FileSecurity)security);
+            }
+        }
     }
 
     private static void EnsureSharedConfigFile(string dataDir)
@@ -311,7 +382,6 @@ internal static class Setup
                 System.Text.Encoding.UTF8);
         }
 
-        RunHidden("icacls.exe", "\"" + configPath + "\" /inheritance:e /grant *S-1-5-32-545:M /grant *S-1-5-11:M /C");
     }
 
     private static void TryCleanupManagedIfeoRules()

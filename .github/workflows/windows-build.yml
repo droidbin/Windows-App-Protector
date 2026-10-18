@@ -1,0 +1,43 @@
+name: Windows build validation
+
+on:
+  push:
+    branches:
+      - master
+      - 'codex/**'
+      - 'beta/**'
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Build application and installer
+        shell: pwsh
+        run: ./build_distribution.ps1
+      - name: Validate release package contents
+        shell: pwsh
+        run: |
+          if (!(Test-Path 'dist/installer/Setup.exe')) { throw 'Setup.exe was not produced.' }
+          if (!(Test-Path 'dist/WindowsAppProtector.zip')) { throw 'WindowsAppProtector.zip was not produced.' }
+          $setupHash = (Get-FileHash 'dist/installer/Setup.exe' -Algorithm SHA256).Hash
+          $zipHash = (Get-FileHash 'dist/WindowsAppProtector.zip' -Algorithm SHA256).Hash
+          "Setup.exe SHA256: $setupHash"
+          "WindowsAppProtector.zip SHA256: $zipHash"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-app-protector-build
+          path: |
+            dist/installer/Setup.exe
+            dist/WindowsAppProtector.zip
+          if-no-files-found: error

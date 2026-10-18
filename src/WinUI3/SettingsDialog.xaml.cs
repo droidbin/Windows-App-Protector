@@ -17,7 +17,14 @@ public sealed class SettingsWindow : Window
     private readonly Dictionary<string, TextBox> hotkeyTextBoxes = new();
     private readonly Dictionary<string, TextBlock> validationTextBlocks = new();
     private readonly StackPanel hotkeyList = new() { Spacing = 14 };
-    private readonly Button saveButton = new() { Content = "\uC800\uC7A5", MinWidth = 84 };
+    private readonly Button saveButton = new()
+    {
+        Content = "\uC800\uC7A5",
+        MinWidth = 96,
+        MinHeight = 38,
+        Background = Brush(0x1F, 0x6B, 0x50),
+        Foreground = new SolidColorBrush(Colors.White),
+    };
     private readonly ToggleSwitch closeToBackgroundSwitch = new()
     {
         Header = "\uB2EB\uAE30 \uBC84\uD2BC\uC744 \uBC31\uADF8\uB77C\uC6B4\uB4DC\uB85C \uC804\uD658",
@@ -60,8 +67,8 @@ public sealed class SettingsWindow : Window
     {
         var root = new Grid
         {
-            Background = Brush(0xF6, 0xF7, 0xF9),
-            Padding = new Thickness(22),
+            Background = Brush(0xF4, 0xF7, 0xF5),
+            Padding = new Thickness(28),
             MinWidth = 820,
             MinHeight = 560,
         };
@@ -72,9 +79,10 @@ public sealed class SettingsWindow : Window
         var title = new TextBlock
         {
             Text = "\uC124\uC815",
-            FontSize = 20,
+            FontSize = 24,
             FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-            Margin = new Thickness(0, 0, 0, 12),
+            Foreground = Brush(0x1C, 0x2B, 0x25),
+            Margin = new Thickness(0, 0, 0, 18),
         };
         Grid.SetRow(title, 0);
         root.Children.Add(title);
@@ -84,7 +92,7 @@ public sealed class SettingsWindow : Window
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
         };
-        var settingsContent = new StackPanel { Spacing = 22 };
+        var settingsContent = new StackPanel { Spacing = 16 };
         settingsContent.Children.Add(BuildGeneralSection());
         settingsContent.Children.Add(BuildHotkeySection());
         scroll.Content = settingsContent;
@@ -99,7 +107,7 @@ public sealed class SettingsWindow : Window
             Margin = new Thickness(0, 18, 0, 0),
         };
 
-        var closeButton = new Button { Content = "\uB2EB\uAE30", MinWidth = 84 };
+        var closeButton = new Button { Content = "\uB2EB\uAE30", MinWidth = 84, MinHeight = 38 };
         closeButton.Click += (_, _) => Close();
         footer.Children.Add(saveButton);
         footer.Children.Add(closeButton);
@@ -114,10 +122,10 @@ public sealed class SettingsWindow : Window
         var section = new Border
         {
             Background = new SolidColorBrush(Colors.White),
-            BorderBrush = Brush(0xD9, 0xDF, 0xE8),
+            BorderBrush = Brush(0xDC, 0xE7, 0xE0),
             BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(6),
-            Padding = new Thickness(18),
+            CornerRadius = new CornerRadius(4),
+            Padding = new Thickness(20),
         };
 
         var panel = new StackPanel { Spacing = 14 };
@@ -126,6 +134,7 @@ public sealed class SettingsWindow : Window
             Text = "\uC77C\uBC18",
             FontSize = 16,
             FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            Foreground = Brush(0x1F, 0x6B, 0x50),
         });
         panel.Children.Add(closeToBackgroundSwitch);
         panel.Children.Add(startWithWindowsSwitch);
@@ -147,10 +156,10 @@ public sealed class SettingsWindow : Window
         var section = new Border
         {
             Background = new SolidColorBrush(Colors.White),
-            BorderBrush = Brush(0xD9, 0xDF, 0xE8),
+            BorderBrush = Brush(0xDC, 0xE7, 0xE0),
             BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(6),
-            Padding = new Thickness(18),
+            CornerRadius = new CornerRadius(4),
+            Padding = new Thickness(20),
         };
 
         var panel = new StackPanel { Spacing = 12 };
@@ -159,6 +168,7 @@ public sealed class SettingsWindow : Window
             Text = "\uB2E8\uCD95\uD0A4",
             FontSize = 16,
             FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            Foreground = Brush(0x1F, 0x6B, 0x50),
         });
         panel.Children.Add(hotkeyList);
         section.Child = panel;

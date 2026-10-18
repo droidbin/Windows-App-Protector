@@ -1,5 +1,5 @@
 Windows App Protector
-Version: 1.1.11
+Version: 1.2.0-beta.4
 
 Install:
 1. Extract this zip file.
