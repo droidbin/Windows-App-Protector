@@ -1,10 +1,11 @@
 Windows App Protector
-Version: 1.2.0-beta.4
+Version: 1.2.0-beta.5
 
 Install:
 1. Extract this zip file.
 2. Double-click Setup.exe.
 3. If Windows asks for administrator permission, click Yes.
+4. Setup automatically removes previous WAP installations before installing. Existing PIN, settings, and protected-app lists are preserved.
 
 Uninstall:
 1. Open the Start menu and run "Windows App Protector Uninstall".

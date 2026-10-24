@@ -10,6 +10,7 @@ public class MainViewModel : ObservableObject
 {
     private readonly ISettingsStore settingsStore;
     private readonly IProtectionService protectionService;
+    private readonly ProtectedAppProcessService protectedAppProcessService = new();
     private readonly AppConfig config = new();
     private bool protectionEnabled;
     private string searchText = string.Empty;
@@ -98,6 +99,19 @@ public class MainViewModel : ObservableObject
         }
     }
 
+    public bool CloseAppsOnLock
+    {
+        get => config.CloseAppsOnLock;
+        set
+        {
+            if (config.CloseAppsOnLock != value)
+            {
+                config.CloseAppsOnLock = value;
+                OnPropertyChanged();
+            }
+        }
+    }
+
     public int IdleLockMinutes
     {
         get => config.IdleLockMinutes;
@@ -158,6 +172,7 @@ public class MainViewModel : ObservableObject
         var loaded = await settingsStore.LoadAsync();
         config.ProtectionEnabled = loaded.ProtectionEnabled;
         config.CloseToBackground = loaded.CloseToBackground;
+        config.CloseAppsOnLock = loaded.CloseAppsOnLock;
         config.StartWithWindows = loaded.StartWithWindows;
         config.IdleLockMinutes = loaded.IdleLockMinutes;
         config.UnlockMinutes = loaded.UnlockMinutes;
@@ -165,6 +180,7 @@ public class MainViewModel : ObservableObject
         config.AppPinSalt = loaded.AppPinSalt;
         config.AppPinHash = loaded.AppPinHash;
         OnPropertyChanged(nameof(CloseToBackground));
+        OnPropertyChanged(nameof(CloseAppsOnLock));
         OnPropertyChanged(nameof(StartWithWindows));
         OnPropertyChanged(nameof(IdleLockMinutes));
         if (loaded.GlobalHotkeys.Count > 0)
@@ -196,6 +212,10 @@ public class MainViewModel : ObservableObject
 
     public async Task SetProtectionEnabledAsync(bool enabled)
     {
+        ProtectedAppProcessCloseResult? closeResult = enabled
+            ? await CloseAppsBeforeLockAsync(config.ProtectedApps)
+            : null;
+
         foreach (var app in config.ProtectedApps)
         {
             app.Enabled = enabled;
@@ -206,6 +226,7 @@ public class MainViewModel : ObservableObject
         await SyncProtectionRulesAsync();
         await SaveAsync();
         UpdateStatus();
+        SetCloseResultStatus(closeResult);
     }
 
     public async Task AddAppAsync(string path)
@@ -231,10 +252,12 @@ public class MainViewModel : ObservableObject
             Enabled = true,
         });
 
+        var closeResult = await CloseAppsBeforeLockAsync(new[] { config.ProtectedApps[^1] });
         RefreshApps();
         await SyncProtectionRulesAsync();
         await SaveAsync();
-        StatusText = $"\uC571 \uCD94\uAC00\uB428: {Path.GetFileName(fullPath)}";
+        StatusText = $"\uD30C\uC77C \uCD94\uAC00\uB428: {Path.GetFileName(fullPath)}";
+        SetCloseResultStatus(closeResult);
     }
 
     public async Task AddPackagedAppAsync(PackagedAppInfo app)
@@ -271,10 +294,12 @@ public class MainViewModel : ObservableObject
             Enabled = true,
         });
 
+        var closeResult = await CloseAppsBeforeLockAsync(new[] { config.ProtectedApps[^1] });
         RefreshApps();
         await SyncProtectionRulesAsync();
         await SaveAsync();
         StatusText = $"\uC124\uCE58 \uC571 \uCD94\uAC00\uB428: {app.Name}";
+        SetCloseResultStatus(closeResult);
     }
 
     private async Task AddDiscoveredWin32AppAsync(PackagedAppInfo app)
@@ -303,10 +328,12 @@ public class MainViewModel : ObservableObject
             Enabled = true,
         });
 
+        var closeResult = await CloseAppsBeforeLockAsync(new[] { config.ProtectedApps[^1] });
         RefreshApps();
         await SyncProtectionRulesAsync();
         await SaveAsync();
         StatusText = $"\uC124\uCE58 \uC571 \uCD94\uAC00\uB428: {app.Name}";
+        SetCloseResultStatus(closeResult);
     }
 
     public async Task RemoveSelectedAppAsync()
@@ -345,15 +372,24 @@ public class MainViewModel : ObservableObject
             return;
         }
 
-        model.Enabled = !model.Enabled;
+        var locking = !model.Enabled;
+        var closeResult = locking
+            ? await CloseAppsBeforeLockAsync(new[] { model })
+            : null;
+        model.Enabled = locking;
         RefreshApps();
         await SyncProtectionRulesAsync();
         await SaveAsync();
         StatusText = model.Enabled ? $"\uC7A0\uAE08 \uD65C\uC131\uD654: {model.Name}" : $"\uC7A0\uAE08 \uD574\uC81C: {model.Name}";
+        SetCloseResultStatus(closeResult);
     }
 
     public async Task SetListedAppsEnabledAsync(bool enabled)
     {
+        ProtectedAppProcessCloseResult? closeResult = enabled
+            ? await CloseAppsBeforeLockAsync(config.ProtectedApps)
+            : null;
+
         foreach (var app in config.ProtectedApps)
         {
             app.Enabled = enabled;
@@ -365,14 +401,16 @@ public class MainViewModel : ObservableObject
         StatusText = enabled
             ? $"\uBAA9\uB85D \uC7A0\uAE08 \uC801\uC6A9: {config.ProtectedApps.Count}\uAC1C"
             : $"\uBAA9\uB85D \uC7A0\uAE08 \uD574\uC81C: {config.ProtectedApps.Count}\uAC1C";
+        SetCloseResultStatus(closeResult);
     }
 
-    public async Task<bool> SavePreferencesAsync(bool closeToBackground, bool startWithWindows, int idleLockMinutes)
+    public async Task<bool> SavePreferencesAsync(bool closeToBackground, bool closeAppsOnLock, bool startWithWindows, int idleLockMinutes)
     {
         try
         {
             StartupService.SetEnabled(startWithWindows);
             CloseToBackground = closeToBackground;
+            CloseAppsOnLock = closeAppsOnLock;
             StartWithWindows = startWithWindows;
             IdleLockMinutes = idleLockMinutes;
             await SaveAsync();
@@ -396,6 +434,7 @@ public class MainViewModel : ObservableObject
             return false;
         }
 
+        var closeResult = await CloseAppsBeforeLockAsync(config.ProtectedApps);
         foreach (var app in config.ProtectedApps)
         {
             app.Enabled = true;
@@ -405,7 +444,31 @@ public class MainViewModel : ObservableObject
         await SyncProtectionRulesAsync();
         await SaveAsync();
         StatusText = $"\uC720\uD734 \uC0C1\uD0DC {config.IdleLockMinutes}\uBD84 \uACBD\uACFC\uB85C \uBAA9\uB85D\uC744 \uC790\uB3D9 \uC7A0\uAE08\uD588\uC2B5\uB2C8\uB2E4.";
+        SetCloseResultStatus(closeResult);
         return true;
+    }
+
+    private async Task<ProtectedAppProcessCloseResult?> CloseAppsBeforeLockAsync(IEnumerable<ProtectedApp> apps)
+    {
+        if (!config.CloseAppsOnLock)
+        {
+            return null;
+        }
+
+        StatusText = "\uC2E4\uD589 \uC911\uC778 \uBCF4\uD638 \uC571\uC744 \uC885\uB8CC\uD558\uB294 \uC911\uC785\uB2C8\uB2E4...";
+        return await protectedAppProcessService.CloseRunningAppsAsync(apps);
+    }
+
+    private void SetCloseResultStatus(ProtectedAppProcessCloseResult? result)
+    {
+        if (result is null)
+        {
+            return;
+        }
+
+        StatusText = result.Value.Failed == 0
+            ? $"\uC2E4\uD589 \uC911\uC778 \uC571 {result.Value.Closed}\uAC1C\uB97C \uC885\uB8CC\uD558\uACE0 \uC7A0\uAE08\uD588\uC2B5\uB2C8\uB2E4."
+            : $"\uC7A0\uAE08\uC740 \uC801\uC6A9\uD588\uC9C0\uB9CC, \uC571 {result.Value.Failed}\uAC1C\uB97C \uC885\uB8CC\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.";
     }
 
     public async Task SetAppPinAsync(string pin)

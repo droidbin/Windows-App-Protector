@@ -2,7 +2,7 @@
 
 WinUI 3 기반 Windows 앱 실행 차단 도구입니다. 보호 목록에 등록한 `.exe` 파일을 Windows IFEO(Image File Execution Options) 규칙 또는 창 감시 방식으로 차단합니다.
 
-현재 작업 버전: `1.2.0-beta.4` (안정판 배포 아님)
+현재 작업 버전: `1.2.0-beta.5` (안정판 배포 아님)
 
 ## 배포 파일
 
@@ -18,8 +18,10 @@ dist\installer\Setup.exe
 
 - 실행 중인 기존 Windows App Protector 프로세스 종료
 - 이전 버전에서 남긴 관리형 IFEO 차단 규칙 정리
-- 구버전 설정 폴더 `%APPDATA%\WindowsAppProtector` 삭제
-- `C:\Program Files\Windows App Protector <버전>`에 WinUI 앱 설치 (기존 버전 폴더 유지)
+- 기존 버전 및 `.old` 설치 폴더 제거, 이전 바로가기·시작 작업·제거 등록 정리
+- PIN·사용자 설정·보호 앱 목록 보존
+- 새 설치 파일의 압축과 필수 파일을 검증한 뒤, 기존 버전을 제거하고 `C:\Program Files\Windows App Protector <버전>`에 설치
+- 기존 버전 제거 실패 시 새 설치 중단
 - 선택 시 바탕화면 및 시작 메뉴 바로가기 생성
 - Windows 앱 제거 목록 등록
 - 설치 완료 후 앱 실행
@@ -43,8 +45,9 @@ dist\installer\Setup.exe
 자동 업데이트는 GitHub Releases의 최신 릴리즈를 기준으로 동작합니다.
 
 - 안정판 릴리즈 태그는 `V1.2.0`처럼 앱 버전과 맞춥니다.
-- 베타 빌드는 `1.2.0-beta.N`으로 표기하고 로컬 또는 검증용 클라우드 빌드로만 배포합니다. 베타 검증이 완료되기 전에는 GitHub Releases에 게시하지 않습니다.
-- 새 버전은 버전별 설치 폴더와 GitHub Release 태그/자산으로 관리하며, 기존 버전의 설치 폴더와 릴리스는 자동으로 덮어쓰거나 삭제하지 않습니다.
+- 베타 빌드는 `1.2.0-beta.N`으로 표기하고 GitHub의 사전 릴리즈(Pre-release)로 공개하며, 안정판의 Latest 표시는 유지합니다.
+- 새 버전 설치 시 기존 설치 폴더를 제거합니다. GitHub의 기존 릴리즈·태그·자산은 보존하며 새 태그로 배포합니다.
+- 이 앱은 사용자의 릴리즈 요청 시 별도 승인 없이 커밋·푸시·GitHub 릴리즈와 배포 자산 검증까지 진행합니다.
 - 안정판을 게시하기 전 Windows 빌드, 자동 업데이트 해시 검증, 설치/업그레이드 및 재부팅 동작을 확인합니다.
 - 릴리즈 자산에는 `Setup.exe`와 `WindowsAppProtector.zip`을 첨부합니다. 자동 업데이트는 GitHub 릴리스 자산의 SHA-256 digest를 확인합니다.
 - `Setup.exe`가 없으면 `WindowsAppProtector.zip` 안의 `Setup.exe`를 찾아 설치합니다.
@@ -69,6 +72,7 @@ dist\installer\Setup.exe
 - GitHub Releases 기반 자동 업데이트
 - 전역 단축키 등록 및 설정
 - 중복 단축키 감지
+- 잠금 시 실행 중인 Win32 보호 앱에 정상 종료를 요청하는 선택 옵션 (기본 꺼짐, 5초 대기, 강제 종료 없음)
 - X 버튼 클릭 시 백그라운드 숨김 아이콘으로 전환
 - 프로그램 종료 메뉴 선택 시 백그라운드 프로세스까지 종료
 - Windows Service 기반 보호 규칙 감시 및 복구
@@ -96,7 +100,7 @@ HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options
 
 Chrome, Edge, Samsung Internet 같은 브라우저는 확장 프로그램과 렌더러 프로세스도 같은 실행 파일을 사용하므로 IFEO 대신 창 감시 방식으로 잠급니다. 이 방식은 브라우저 확장 프로세스를 끊지 않으면서 잠금 상태의 브라우저 창을 숨깁니다.
 
-차단된 앱을 새로 실행하면 대상 앱을 강제 종료하지 않고 실행만 막습니다. 이미 실행 중인 앱은 유지되므로 카카오톡처럼 세션 유지가 중요한 앱을 잠갔다 풀 때 재로그인이 발생하지 않도록 설계했습니다.
+차단된 앱을 새로 실행하면 대상 앱을 강제 종료하지 않고 실행만 막습니다. 기본 설정에서는 이미 실행 중인 앱을 유지합니다. 설정에서 잠금 시 앱 종료를 켜면 Win32 보호 앱에 정상 종료를 요청하고 5초 대기합니다. 패키지 앱은 종료 대상에서 제외되며, 종료를 거부하는 앱은 강제 종료하지 않습니다. 저장되지 않은 작업은 손실될 수 있습니다.
 
 Windows 시작 시 자동 실행은 관리자 권한 앱이 로그인 후 안정적으로 실행되도록 `Windows App Protector` 예약 작업으로 등록합니다. 이전 버전의 HKCU Run 등록은 새 설정 저장 시 자동으로 정리됩니다.
 

@@ -37,6 +37,12 @@ public sealed class SettingsWindow : Window
         OnContent = "\uCF1C\uC9D0",
         OffContent = "\uAEBC\uC9D0",
     };
+    private readonly ToggleSwitch closeAppsOnLockSwitch = new()
+    {
+        Header = "\uC7A0\uAE08 \uC2DC \uC2E4\uD589 \uC911\uC778 \uBCF4\uD638 \uC571 \uC885\uB8CC",
+        OnContent = "\uCF1C\uC9D0",
+        OffContent = "\uAEBC\uC9D0",
+    };
     private readonly TextBox idleLockMinutesBox = new()
     {
         Header = "\uC720\uD734 \uC2DC \uC790\uB3D9 \uC7A0\uAE08(\uBD84)",
@@ -138,6 +144,14 @@ public sealed class SettingsWindow : Window
         });
         panel.Children.Add(closeToBackgroundSwitch);
         panel.Children.Add(startWithWindowsSwitch);
+        panel.Children.Add(closeAppsOnLockSwitch);
+        panel.Children.Add(new TextBlock
+        {
+            Text = "\uC885\uB8CC \uC694\uCCAD \uD6C4 5\uCD08 \uB300\uAE30\uD569\uB2C8\uB2E4. \uC800\uC7A5\uB418\uC9C0 \uC54A\uC740 \uC791\uC5C5\uC740 \uC190\uC2E4\uB420 \uC218 \uC788\uC73C\uBA70, \uC751\uB2F5\uD558\uC9C0 \uC54A\uB294 \uC571\uC740 \uAC15\uC81C \uC885\uB8CC\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.",
+            FontSize = 12,
+            Foreground = Brush(0xA5, 0x21, 0x2B),
+            TextWrapping = TextWrapping.Wrap,
+        });
         panel.Children.Add(idleLockMinutesBox);
         panel.Children.Add(new TextBlock
         {
@@ -179,6 +193,7 @@ public sealed class SettingsWindow : Window
     {
         closeToBackgroundSwitch.IsOn = ViewModel.CloseToBackground;
         startWithWindowsSwitch.IsOn = ViewModel.StartWithWindows;
+        closeAppsOnLockSwitch.IsOn = ViewModel.CloseAppsOnLock;
         idleLockMinutesBox.Text = ViewModel.IdleLockMinutes.ToString();
     }
 
@@ -298,7 +313,7 @@ public sealed class SettingsWindow : Window
                 ? parsedIdleLockMinutes
                 : ViewModel.IdleLockMinutes;
 
-            if (await ViewModel.SavePreferencesAsync(closeToBackgroundSwitch.IsOn, startWithWindowsSwitch.IsOn, idleLockMinutes))
+            if (await ViewModel.SavePreferencesAsync(closeToBackgroundSwitch.IsOn, closeAppsOnLockSwitch.IsOn, startWithWindowsSwitch.IsOn, idleLockMinutes))
             {
                 Close();
             }

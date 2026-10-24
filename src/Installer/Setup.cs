@@ -15,12 +15,13 @@ internal static class Setup
 {
     private static readonly byte[] Marker = System.Text.Encoding.ASCII.GetBytes("WAPZIP01");
     private const string AppName = "Windows App Protector";
-    private const string AppVersion = "1.2.0-beta.4";
+    private const string AppVersion = "1.2.0-beta.5";
     private const string ExeName = "WindowsAppProtector.WinUI.exe";
     private const string ServiceExeName = "WindowsAppProtector.Service.exe";
     private const string ServiceName = "WindowsAppProtectorService";
     private const string IfeoRegistryPath = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options";
     private const string MarkerName = "WindowsAppProtectorManaged";
+    private const string UninstallRegistryPath = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\WindowsAppProtector";
     private const int DialogResultYes = 6;
     private const uint MessageBoxInformation = 0x00000040;
     private const uint MessageBoxError = 0x00000010;
@@ -28,6 +29,7 @@ internal static class Setup
 
     private static int Main(string[] args)
     {
+        string stagingDir = null;
         try
         {
             if (!IsAdministrator())
@@ -42,31 +44,43 @@ internal static class Setup
                 Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
                 AppName);
 
+            // Validate and unpack the new payload before removing a working installation.
+            stagingDir = Path.Combine(Path.GetTempPath(), "WindowsAppProtector.Setup." + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(stagingDir);
+            string zipPath = Path.Combine(stagingDir, "payload.zip");
+            string payloadDir = Path.Combine(stagingDir, "payload");
+            ExtractEmbeddedPayload(zipPath);
+            ZipFile.ExtractToDirectory(zipPath, payloadDir);
+            foreach (string requiredFile in new[] { ExeName, "WindowsAppProtector.WinUI.dll", ServiceExeName })
+            {
+                if (!File.Exists(Path.Combine(payloadDir, requiredFile)))
+                {
+                    throw new InvalidDataException("설치 파일에 필요한 구성 요소가 없습니다: " + requiredFile);
+                }
+            }
+
+            var previousInstallDirs = FindPreviousInstallDirectories(programFilesDir, installDir);
+            foreach (string previousDir in previousInstallDirs)
+            {
+                ValidateInstallDirectoryRemoval(previousDir);
+            }
+
             WaitForUpdateSourceProcess(args);
             StopAndDeleteService();
             CleanupOldProcesses();
             TryCleanupManagedIfeoRules();
-            DeleteDirectoryIfExists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WindowsAppProtector"));
-            string oldInstallDir;
-            if (!TryMoveInstallDirectoryAside(installDir, out oldInstallDir))
+            foreach (string previousDir in previousInstallDirs)
             {
-                installDir = Path.Combine(programFilesDir, AppName + " " + AppVersion);
-                if (!TryMoveInstallDirectoryAside(installDir, out oldInstallDir))
-                {
-                    throw new IOException("설치 폴더를 준비할 수 없습니다. Windows App Protector 프로세스를 종료한 뒤 다시 실행하세요.");
-                }
+                DeleteDirectoryIfExists(previousDir);
             }
+            RemovePreviousInstallRegistration();
 
             Directory.CreateDirectory(installDir);
             Directory.CreateDirectory(dataDir);
             EnsureSharedConfigFile(dataDir);
             SecureDataDirectory(dataDir);
 
-            string zipPath = Path.Combine(Path.GetTempPath(), "WindowsAppProtector.Payload.zip");
-            ExtractEmbeddedPayload(zipPath);
-            ZipFile.ExtractToDirectory(zipPath, installDir);
-            File.Delete(zipPath);
-            // Keep the previous same-version installation as a recoverable local copy.
+            CopyPayloadDirectory(payloadDir, installDir);
 
             string targetPath = Path.Combine(installDir, ExeName);
             bool createShortcuts = AskCreateShortcuts();
@@ -107,6 +121,10 @@ internal static class Setup
         {
             MessageBoxW(IntPtr.Zero, "\uC124\uCE58 \uC2E4\uD328:\n" + ex.Message, AppName, MessageBoxError);
             return 1;
+        }
+        finally
+        {
+            TryDeleteDirectory(stagingDir);
         }
     }
 
@@ -539,7 +557,7 @@ internal static class Setup
         try
         {
             using (var localMachine = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64))
-            using (var key = localMachine.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\WindowsAppProtector", true))
+            using (var key = localMachine.CreateSubKey(UninstallRegistryPath, true))
             {
                 if (key == null)
                 {
@@ -559,41 +577,154 @@ internal static class Setup
         }
     }
 
-    private static bool TryMoveInstallDirectoryAside(string installDir, out string backupDir)
+    private static bool HasInstallationFiles(string path)
     {
-        backupDir = null;
-        if (!Directory.Exists(installDir))
+        return (File.Exists(Path.Combine(path, ExeName)) &&
+                File.Exists(Path.Combine(path, "WindowsAppProtector.WinUI.dll"))) ||
+            (File.Exists(Path.Combine(path, "Uninstall.bat")) &&
+                (File.Exists(Path.Combine(path, "WindowsAppProtector.exe")) ||
+                 File.Exists(Path.Combine(path, "WindowsAppProtector-1.6.0.exe"))));
+    }
+
+    private static IEnumerable<string> FindInstallDirectoriesUnder(string programFilesDir)
+    {
+        if (string.IsNullOrEmpty(programFilesDir) || !Directory.Exists(programFilesDir))
         {
-            return true;
+            return Enumerable.Empty<string>();
         }
 
-        string parent = Path.GetDirectoryName(installDir);
-        if (string.IsNullOrEmpty(parent))
-        {
-            return false;
-        }
+        return Directory.GetDirectories(programFilesDir, AppName + "*")
+            .Where(path =>
+                string.Equals(Path.GetFileName(path), AppName, StringComparison.OrdinalIgnoreCase) ||
+                Path.GetFileName(path).StartsWith(AppName + " ", StringComparison.OrdinalIgnoreCase) ||
+                Path.GetFileName(path).StartsWith(AppName + ".old.", StringComparison.OrdinalIgnoreCase))
+            .Where(HasInstallationFiles);
+    }
 
-        for (int attempt = 0; attempt < 10; attempt++)
+    private static List<string> FindPreviousInstallDirectories(string programFilesDir, string installDir)
+    {
+        var directories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
         {
-            string candidateBackupDir = Path.Combine(
-                parent,
-                Path.GetFileName(installDir) + ".old." + Process.GetCurrentProcess().Id + "." + DateTime.UtcNow.Ticks);
-
-            try
+            using (var localMachine = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, view))
+            using (var key = localMachine.OpenSubKey(UninstallRegistryPath))
             {
-                Directory.Move(installDir, candidateBackupDir);
-                backupDir = candidateBackupDir;
-                return true;
-            }
-            catch
-            {
-                StopAndDeleteService();
-                CleanupOldProcesses();
-                Thread.Sleep(700);
+                string registeredDir = key == null ? null : Convert.ToString(key.GetValue("InstallLocation"));
+                if (!string.IsNullOrWhiteSpace(registeredDir) && Directory.Exists(registeredDir))
+                {
+                    // Fail rather than deleting an unrecognized registered directory.
+                    ValidateInstallDirectoryRemoval(registeredDir);
+                    directories.Add(Path.GetFullPath(registeredDir).TrimEnd(Path.DirectorySeparatorChar));
+                }
             }
         }
 
-        return false;
+        foreach (string root in new[] { programFilesDir, Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86) })
+        {
+            foreach (string directory in FindInstallDirectoriesUnder(root))
+            {
+                directories.Add(Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar));
+            }
+        }
+
+        if (Directory.Exists(installDir))
+        {
+            ValidateInstallDirectoryRemoval(installDir);
+            directories.Add(Path.GetFullPath(installDir).TrimEnd(Path.DirectorySeparatorChar));
+        }
+
+        return directories.OrderByDescending(path => path.Length).ToList();
+    }
+
+    private static void ValidateInstallDirectoryRemoval(string path)
+    {
+        string fullPath = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar);
+        var protectedRoots = new[]
+        {
+            Path.GetPathRoot(fullPath),
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)
+        };
+        if (protectedRoots.Any(root => !string.IsNullOrEmpty(root) &&
+                string.Equals(fullPath, root.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase)) ||
+            !HasInstallationFiles(fullPath))
+        {
+            throw new IOException("기존 WAP 설치 폴더임을 확인할 수 없어 제거하지 않았습니다: " + fullPath);
+        }
+
+        string self = Path.GetFullPath(Assembly.GetExecutingAssembly().Location);
+        if (self.StartsWith(fullPath + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new IOException("설치 파일을 기존 설치 폴더 밖으로 복사한 뒤 실행하세요.");
+        }
+
+        for (var directory = new DirectoryInfo(fullPath); directory != null; directory = directory.Parent)
+        {
+            if ((directory.Attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new IOException("연결된 설치 폴더는 자동 제거할 수 없습니다: " + fullPath);
+            }
+        }
+
+        var pending = new Queue<string>();
+        pending.Enqueue(fullPath);
+        while (pending.Count > 0)
+        {
+            foreach (string entry in Directory.GetFileSystemEntries(pending.Dequeue()))
+            {
+                var attributes = File.GetAttributes(entry);
+                if ((attributes & FileAttributes.ReparsePoint) != 0)
+                {
+                    throw new IOException("설치 폴더 안에 연결된 항목이 있어 제거하지 않았습니다: " + entry);
+                }
+                if ((attributes & FileAttributes.Directory) != 0)
+                {
+                    pending.Enqueue(entry);
+                }
+            }
+        }
+    }
+
+    private static void RemovePreviousInstallRegistration()
+    {
+        RunHidden("schtasks.exe", "/Delete /TN \"Windows App Protector\" /F");
+        using (var runKey = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true))
+        {
+            if (runKey != null) runKey.DeleteValue(AppName, false);
+        }
+        foreach (string shortcut in new[]
+        {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory), AppName + ".lnk"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu), "Programs", AppName + ".lnk"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu), "Programs", AppName + " Uninstall.lnk")
+        })
+        {
+            File.Delete(shortcut);
+        }
+        foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
+        {
+            using (var localMachine = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, view))
+            {
+                localMachine.DeleteSubKeyTree(UninstallRegistryPath, false);
+            }
+        }
+    }
+
+    private static void CopyPayloadDirectory(string source, string destination)
+    {
+        Directory.CreateDirectory(destination);
+        foreach (string file in Directory.GetFiles(source))
+        {
+            File.Copy(file, Path.Combine(destination, Path.GetFileName(file)), true);
+        }
+        foreach (string directory in Directory.GetDirectories(source))
+        {
+            CopyPayloadDirectory(directory, Path.Combine(destination, Path.GetFileName(directory)));
+        }
     }
 
     private static void TryDeleteDirectory(string path)

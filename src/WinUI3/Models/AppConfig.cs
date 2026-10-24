@@ -4,6 +4,7 @@ public sealed class AppConfig
 {
     public bool ProtectionEnabled { get; set; }
     public bool CloseToBackground { get; set; } = true;
+    public bool CloseAppsOnLock { get; set; }
     public bool StartWithWindows { get; set; }
     public int IdleLockMinutes { get; set; } = 10;
     public int UnlockMinutes { get; set; } = 10;
