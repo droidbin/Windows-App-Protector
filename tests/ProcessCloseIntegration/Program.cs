@@ -18,8 +18,28 @@ internal static class Program
             Application.Run(form);
             return 0;
         }
-        try { RunAsync(args.Single()).GetAwaiter().GetResult(); return 0; }
+        try
+        {
+            if (args.FirstOrDefault() == "--discovery") DiscoveryAsync(args[1]).GetAwaiter().GetResult();
+            else RunAsync(args.Single()).GetAwaiter().GetResult();
+            return 0;
+        }
         catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
+    }
+
+    private static async Task DiscoveryAsync(string output)
+    {
+        var results = new List<object>();
+        for (var i = 0; i < 3; i++)
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+            var apps = await new PackagedAppDiscoveryService().GetInstalledAppsAsync(timeout.Token);
+            if (apps.Count == 0 || apps.Any(app => string.IsNullOrWhiteSpace(app.Name) || string.IsNullOrWhiteSpace(app.Path)))
+                throw new Exception("Installed-app discovery returned empty or invalid items");
+            results.Add(new { iteration = i + 1, count = apps.Count, passed = true });
+        }
+        File.WriteAllText(output, JsonSerializer.Serialize(results, new JsonSerializerOptions { WriteIndented = true }));
+        Console.WriteLine("Installed-app discovery: three iterations passed.");
     }
 
     private static async Task RunAsync(string output)

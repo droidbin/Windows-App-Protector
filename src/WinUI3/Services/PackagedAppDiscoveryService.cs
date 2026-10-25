@@ -16,6 +16,7 @@ public sealed class PackagedAppDiscoveryService
     {
         var script = @"
 $ErrorActionPreference = 'SilentlyContinue'
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $seen = @{}
 $startNames = @{}
 
@@ -184,7 +185,9 @@ foreach ($root in $uninstallRoots) {
   }
 }
 
-$items | Sort-Object Name, Source, Path, AppUserModelId -Unique | ConvertTo-Json -Depth 4
+# Write a single compact JSON array directly, without PowerShell host formatting/wrapping.
+$json = ConvertTo-Json -InputObject @($items | Sort-Object Name, Source, Path, AppUserModelId -Unique) -Depth 4 -Compress
+[Console]::Out.Write($json)
 ";
 
         var startInfo = new ProcessStartInfo
@@ -195,6 +198,8 @@ $items | Sort-Object Name, Source, Path, AppUserModelId -Unique | ConvertTo-Json
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8,
         };
 
         using var process = Process.Start(startInfo)

@@ -8,6 +8,8 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../src/WinUI3/Models/ProtectedApp.cs" Link="ProtectedApp.cs" />
+    <Compile Include="../../src/WinUI3/Models/PackagedAppInfo.cs" Link="PackagedAppInfo.cs" />
+    <Compile Include="../../src/WinUI3/Services/PackagedAppDiscoveryService.cs" Link="PackagedAppDiscoveryService.cs" />
     <Compile Include="../../src/WinUI3/Services/ProtectedAppProcessService.cs" Link="ProtectedAppProcessService.cs" />
   </ItemGroup>
 </Project>

@@ -5,8 +5,11 @@ Run on a Windows desktop session. The test opens disposable WinForms windows and
 ```powershell
 dotnet publish tests/ProcessCloseIntegration/ProcessCloseIntegration.csproj -c Release -r win-x64 --self-contained true -o build/process-close-integration
 ./build/process-close-integration/ProcessCloseIntegration.exe build/process-close-result.json
+./build/process-close-integration/ProcessCloseIntegration.exe --discovery build/discovery-result.json
 ```
 
 The test compiles the production process-close service and model directly. It checks an empty list, packaged-app exclusion, full-path matching, a currently disabled Win32 target, multiple processes, graceful exit, the five-second grace period, and a refusing process remaining alive. Cleanup terminates only fixture children created by the test.
 
 This does not verify the WAP UI, administrator malware resistance, real unsaved documents, different privilege levels, or clean-machine installation.
+
+The optional discovery mode calls the production installed-app discovery service three times and verifies that every run returns nonempty, valid app names and paths. It records only counts, not installed-app names or paths.
