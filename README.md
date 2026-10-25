@@ -2,7 +2,7 @@
 
 WinUI 3 기반 Windows 앱 실행 차단 도구입니다. 보호 목록에 등록한 `.exe` 파일을 Windows IFEO(Image File Execution Options) 규칙 또는 창 감시 방식으로 차단합니다.
 
-현재 작업 버전: `1.2.0-beta.5` (안정판 배포 아님)
+현재 작업 버전: `1.2.0-beta.6` (안정판 배포 아님)
 
 ## 배포 파일
 
@@ -20,7 +20,8 @@ dist\installer\Setup.exe
 - 이전 버전에서 남긴 관리형 IFEO 차단 규칙 정리
 - 기존 버전 및 `.old` 설치 폴더 제거, 이전 바로가기·시작 작업·제거 등록 정리
 - PIN·사용자 설정·보호 앱 목록 보존
-- 새 설치 파일의 압축과 필수 파일을 검증한 뒤, 기존 버전을 제거하고 `C:\Program Files\Windows App Protector <버전>`에 설치
+- 새 설치 파일의 압축·필수 파일·앱 실행을 검증한 뒤, 기존 버전을 제거하고 `C:\Program Files\Windows App Protector <버전>`에 설치
+- .NET 및 Windows App SDK 런타임을 앱 폴더에 포함하므로 별도 런타임 설치나 설치 중 인터넷 연결 불필요
 - 기존 버전 제거 실패 시 새 설치 중단
 - 선택 시 바탕화면 및 시작 메뉴 바로가기 생성
 - Windows 앱 제거 목록 등록

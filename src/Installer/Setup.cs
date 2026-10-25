@@ -15,7 +15,7 @@ internal static class Setup
 {
     private static readonly byte[] Marker = System.Text.Encoding.ASCII.GetBytes("WAPZIP01");
     private const string AppName = "Windows App Protector";
-    private const string AppVersion = "1.2.0-beta.5";
+    private const string AppVersion = "1.2.0-beta.6";
     private const string ExeName = "WindowsAppProtector.WinUI.exe";
     private const string ServiceExeName = "WindowsAppProtector.Service.exe";
     private const string ServiceName = "WindowsAppProtectorService";
@@ -59,6 +59,7 @@ internal static class Setup
                 }
             }
 
+            VerifyPayloadLaunch(payloadDir);
             var previousInstallDirs = FindPreviousInstallDirectories(programFilesDir, installDir);
             foreach (string previousDir in previousInstallDirs)
             {
@@ -125,6 +126,32 @@ internal static class Setup
         finally
         {
             TryDeleteDirectory(stagingDir);
+        }
+    }
+
+    private static void VerifyPayloadLaunch(string payloadDir)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = Path.Combine(payloadDir, ExeName),
+            Arguments = "--verify-install",
+            WorkingDirectory = payloadDir,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        startInfo.EnvironmentVariables["DOTNET_DISABLE_GUI_ERRORS"] = "1";
+        using (var process = Process.Start(startInfo))
+        {
+            if (process == null)
+                throw new InvalidOperationException("앱 실행 확인을 시작하지 못했습니다.");
+            if (!process.WaitForExit(20000))
+            {
+                process.Kill();
+                process.WaitForExit(5000);
+                throw new InvalidOperationException("앱 실행 확인 시간이 초과되었습니다. 기존 버전은 유지됩니다.");
+            }
+            if (process.ExitCode != 0)
+                throw new InvalidOperationException("앱 실행 확인에 실패했습니다 (0x" + process.ExitCode.ToString("X8") + "). 기존 버전은 유지됩니다.");
         }
     }
 

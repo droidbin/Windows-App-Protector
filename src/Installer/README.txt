@@ -1,5 +1,5 @@
 Windows App Protector
-Version: 1.2.0-beta.5
+Version: 1.2.0-beta.6
 
 Install:
 1. Extract this zip file.
@@ -12,6 +12,7 @@ Uninstall:
 2. You can also double-click Uninstall.bat in this folder.
 
 Notes:
+- .NET and Windows App SDK runtimes are included. No separate runtime installation or internet connection is required for setup.
 - Setup.exe must be run with administrator permission because the app installs a Windows Service and app launch blocking rules.
 - Keep Setup.exe and Uninstall.bat together when sharing this package.
 - Automatic updates use the latest GitHub Release from droidbin/windows-app-protector.

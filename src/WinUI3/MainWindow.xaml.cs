@@ -254,6 +254,7 @@ public sealed class MainWindow : Window
             Background = primary ? Brush(0x1F, 0x6B, 0x50) : new SolidColorBrush(Colors.Transparent),
             Foreground = primary ? new SolidColorBrush(Colors.White) : Brush(0x2D, 0x3B, 0x34),
         };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, text);
         button.Click += handler;
         return button;
     }
@@ -269,6 +270,7 @@ public sealed class MainWindow : Window
             Background = new SolidColorBrush(Colors.Transparent),
         };
         ToolTipService.SetToolTip(button, label);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, label);
         button.Click += handler;
         return button;
     }
@@ -1065,7 +1067,6 @@ public sealed class MainWindow : Window
 
             ShowWindow(windowHandle, SwHide);
             hiddenProtectedWindows.Add(windowHandle);
-            ViewModel.StatusText = $"\uC7A0\uAE08\uB41C \uC571 \uCC3D\uC744 \uC228\uACBC\uC2B5\uB2C8\uB2E4: {matchedName}";
             return true;
         }, IntPtr.Zero);
     }

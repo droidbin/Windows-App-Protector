@@ -21,12 +21,21 @@ Get-Process WindowsAppProtector.WinUI -ErrorAction SilentlyContinue | Where-Obje
     }
 } | Stop-Process -Force -ErrorAction SilentlyContinue
 
-& "$root\build_winui3.bat"
+$payloadSource = Join-Path $root "build\publish-win-x64"
+# Publish, rather than build output, includes both .NET and Windows App SDK runtimes.
+if (Test-Path -LiteralPath $payloadSource) {
+    $resolved = (Resolve-Path -LiteralPath $payloadSource).Path
+    if ($resolved -ne (Join-Path $root "build\publish-win-x64")) { throw "Unexpected publish directory: $resolved" }
+    Remove-Item -LiteralPath $resolved -Recurse -Force
+}
+& dotnet publish "$root\src\WinUI3\WindowsAppProtector.WinUI.csproj" -c Release -p:Platform=x64 -r win-x64 --self-contained true -o $payloadSource
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-$payloadSource = Join-Path $root "src\WinUI3\bin\x64\Release\net8.0-windows10.0.19041.0"
+foreach ($required in @("hostfxr.dll", "coreclr.dll", "Microsoft.UI.Xaml.dll")) {
+    if (!(Test-Path -LiteralPath (Join-Path $payloadSource $required))) { throw "Missing app-local runtime: $required" }
+}
 $serviceSource = Join-Path $root "src\Service\WindowsAppProtector.Service.cs"
 $serviceBuildDir = Join-Path $root "build\service"
 $serviceExe = Join-Path $serviceBuildDir "WindowsAppProtector.Service.exe"
@@ -40,9 +49,13 @@ $setupExe = Join-Path $distDir "Setup.exe"
 $versionedDistDir = Join-Path $root ("dist\releases\" + $appVersion)
 $zipPath = Join-Path $buildDir "payload.zip"
 
-Remove-Item -LiteralPath $buildDir -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $distDir -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $serviceBuildDir -Recurse -Force -ErrorAction SilentlyContinue
+foreach ($cleanupDir in @($buildDir, $distDir, $serviceBuildDir)) {
+    if (Test-Path -LiteralPath $cleanupDir) {
+        $resolved = (Resolve-Path -LiteralPath $cleanupDir).Path
+        if (!$resolved.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) { throw "Unexpected cleanup directory: $resolved" }
+        Remove-Item -LiteralPath $resolved -Recurse -Force
+    }
+}
 New-Item -ItemType Directory -Path $serviceBuildDir | Out-Null
 New-Item -ItemType Directory -Path $payloadDir | Out-Null
 New-Item -ItemType Directory -Path $distDir | Out-Null

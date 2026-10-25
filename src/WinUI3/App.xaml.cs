@@ -15,6 +15,17 @@ public partial class App : Application
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
+        // Exercise WinUI and its native dependencies without opening the app or changing user data.
+        if (Environment.GetCommandLineArgs().Any(arg => string.Equals(arg, "--verify-install", StringComparison.OrdinalIgnoreCase)))
+        {
+            _ = new Microsoft.UI.Xaml.Controls.Grid
+            {
+                Children = { new Microsoft.UI.Xaml.Controls.TextBlock { Text = "Windows App Protector" } }
+            };
+            Exit();
+            return;
+        }
+
         if (Environment.GetCommandLineArgs().Any(arg => string.Equals(arg, "--blocked", StringComparison.OrdinalIgnoreCase)))
         {
             MessageBoxW(IntPtr.Zero, "\uC774 \uC571\uC740 Windows App Protector\uC5D0 \uC758\uD574 \uCC28\uB2E8\uB418\uC5C8\uC2B5\uB2C8\uB2E4.", "Windows App Protector", 0x00000030);
