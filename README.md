@@ -2,7 +2,7 @@
 
 WinUI 3 기반 Windows 앱 실행 차단 도구입니다. 보호 목록에 등록한 `.exe` 파일을 Windows IFEO(Image File Execution Options) 규칙 또는 창 감시 방식으로 차단합니다.
 
-현재 작업 버전: `1.2.0-beta.6` (안정판 배포 아님)
+현재 배포 버전: `1.2.0`
 
 ## 배포 파일
 

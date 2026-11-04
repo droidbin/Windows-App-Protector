@@ -15,7 +15,7 @@ internal static class Setup
 {
     private static readonly byte[] Marker = System.Text.Encoding.ASCII.GetBytes("WAPZIP01");
     private const string AppName = "Windows App Protector";
-    private const string AppVersion = "1.2.0-beta.6";
+    private const string AppVersion = "1.2.0";
     private const string ExeName = "WindowsAppProtector.WinUI.exe";
     private const string ServiceExeName = "WindowsAppProtector.Service.exe";
     private const string ServiceName = "WindowsAppProtectorService";
@@ -72,7 +72,14 @@ internal static class Setup
             TryCleanupManagedIfeoRules();
             foreach (string previousDir in previousInstallDirs)
             {
-                DeleteDirectoryIfExists(previousDir);
+                if (!string.Equals(previousDir, installDir, StringComparison.OrdinalIgnoreCase))
+                {
+                    DeleteDirectoryIfExists(previousDir);
+                }
+                else
+                {
+                    CleanDirectoryContents(previousDir);
+                }
             }
             RemovePreviousInstallRegistration();
 
@@ -120,7 +127,8 @@ internal static class Setup
         }
         catch (Exception ex)
         {
-            MessageBoxW(IntPtr.Zero, "\uC124\uCE58 \uC2E4\uD328:\n" + ex.Message, AppName, MessageBoxError);
+            string detail = ex.InnerException != null ? "\n\n세부 정보:\n" + ex.InnerException.Message : "";
+            MessageBoxW(IntPtr.Zero, "설치 실패:\n" + ex.Message + detail, AppName, MessageBoxError);
             return 1;
         }
         finally
@@ -267,14 +275,14 @@ internal static class Setup
             }
         }
 
-        return Path.Combine(programFilesDir, AppName + " " + AppVersion);
+        return Path.Combine(programFilesDir, AppName);
     }
 
     private static string NormalizeInstallDirectory(string value, string programFilesDir)
     {
         if (string.IsNullOrWhiteSpace(value))
         {
-            return Path.Combine(programFilesDir, AppName + " " + AppVersion);
+            return Path.Combine(programFilesDir, AppName);
         }
 
         return Path.GetFullPath(value.Trim().Trim('"'));
@@ -563,6 +571,7 @@ internal static class Setup
             "sc delete WindowsAppProtectorService >nul 2>&1\r\n" +
             "taskkill /IM WindowsAppProtector.WinUI.exe /F >nul 2>&1\r\n" +
             "taskkill /IM WindowsAppProtector.Service.exe /F >nul 2>&1\r\n" +
+            "timeout /t 1 /nobreak >nul 2>&1\r\n" +
             "schtasks /Delete /TN \"Windows App Protector\" /F >nul 2>&1\r\n" +
             "reg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\" /v \"Windows App Protector\" /f >nul 2>&1\r\n" +
             "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$root='HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options'; Get-ChildItem $root -ErrorAction SilentlyContinue | ForEach-Object { $p=Get-ItemProperty $_.PsPath -ErrorAction SilentlyContinue; if ($p.WindowsAppProtectorManaged -eq '1') { Remove-Item $_.PsPath -Force -ErrorAction SilentlyContinue } }\"\r\n" +
@@ -606,11 +615,36 @@ internal static class Setup
 
     private static bool HasInstallationFiles(string path)
     {
-        return (File.Exists(Path.Combine(path, ExeName)) &&
-                File.Exists(Path.Combine(path, "WindowsAppProtector.WinUI.dll"))) ||
-            (File.Exists(Path.Combine(path, "Uninstall.bat")) &&
-                (File.Exists(Path.Combine(path, "WindowsAppProtector.exe")) ||
-                 File.Exists(Path.Combine(path, "WindowsAppProtector-1.6.0.exe"))));
+        try
+        {
+            if (File.Exists(Path.Combine(path, ExeName)) ||
+                File.Exists(Path.Combine(path, "WindowsAppProtector.WinUI.dll")) ||
+                File.Exists(Path.Combine(path, ServiceExeName)) ||
+                File.Exists(Path.Combine(path, "WindowsAppProtector.exe")) ||
+                File.Exists(Path.Combine(path, "WindowsAppProtector-1.6.0.exe")) ||
+                File.Exists(Path.Combine(path, "Uninstall.bat")))
+            {
+                return true;
+            }
+
+            foreach (string entry in Directory.GetFileSystemEntries(path))
+            {
+                string name = Path.GetFileName(entry);
+                if (name.StartsWith("WindowsAppProtector", StringComparison.OrdinalIgnoreCase) ||
+                    name.StartsWith(AppName, StringComparison.OrdinalIgnoreCase) ||
+                    name.Equals("Uninstall.bat", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return !Directory.EnumerateFileSystemEntries(path).Any();
+        }
+        catch
+        {
+            string folderName = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar));
+            return folderName.StartsWith(AppName, StringComparison.OrdinalIgnoreCase);
+        }
     }
 
     private static IEnumerable<string> FindInstallDirectoriesUnder(string programFilesDir)
@@ -639,9 +673,14 @@ internal static class Setup
                 string registeredDir = key == null ? null : Convert.ToString(key.GetValue("InstallLocation"));
                 if (!string.IsNullOrWhiteSpace(registeredDir) && Directory.Exists(registeredDir))
                 {
-                    // Fail rather than deleting an unrecognized registered directory.
-                    ValidateInstallDirectoryRemoval(registeredDir);
-                    directories.Add(Path.GetFullPath(registeredDir).TrimEnd(Path.DirectorySeparatorChar));
+                    try
+                    {
+                        ValidateInstallDirectoryRemoval(registeredDir);
+                        directories.Add(Path.GetFullPath(registeredDir).TrimEnd(Path.DirectorySeparatorChar));
+                    }
+                    catch
+                    {
+                    }
                 }
             }
         }
@@ -650,13 +689,19 @@ internal static class Setup
         {
             foreach (string directory in FindInstallDirectoriesUnder(root))
             {
-                directories.Add(Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar));
+                try
+                {
+                    ValidateInstallDirectoryRemoval(directory);
+                    directories.Add(Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar));
+                }
+                catch
+                {
+                }
             }
         }
 
         if (Directory.Exists(installDir))
         {
-            ValidateInstallDirectoryRemoval(installDir);
             directories.Add(Path.GetFullPath(installDir).TrimEnd(Path.DirectorySeparatorChar));
         }
 
@@ -691,9 +736,19 @@ internal static class Setup
 
         for (var directory = new DirectoryInfo(fullPath); directory != null; directory = directory.Parent)
         {
-            if ((directory.Attributes & FileAttributes.ReparsePoint) != 0)
+            try
             {
-                throw new IOException("연결된 설치 폴더는 자동 제거할 수 없습니다: " + fullPath);
+                if ((directory.Attributes & FileAttributes.ReparsePoint) != 0)
+                {
+                    throw new IOException("연결된 설치 폴더는 자동 제거할 수 없습니다: " + fullPath);
+                }
+            }
+            catch (IOException)
+            {
+                throw;
+            }
+            catch
+            {
             }
         }
 
@@ -701,16 +756,41 @@ internal static class Setup
         pending.Enqueue(fullPath);
         while (pending.Count > 0)
         {
-            foreach (string entry in Directory.GetFileSystemEntries(pending.Dequeue()))
+            string current = pending.Dequeue();
+            string[] entries;
+            try
             {
-                var attributes = File.GetAttributes(entry);
-                if ((attributes & FileAttributes.ReparsePoint) != 0)
+                entries = Directory.GetFileSystemEntries(current);
+            }
+            catch
+            {
+                continue;
+            }
+
+            foreach (string entry in entries)
+            {
+                try
                 {
-                    throw new IOException("설치 폴더 안에 연결된 항목이 있어 제거하지 않았습니다: " + entry);
+                    var attributes = File.GetAttributes(entry);
+                    if ((attributes & FileAttributes.ReparsePoint) != 0)
+                    {
+                        throw new IOException("설치 폴더 안에 연결된 항목이 있어 제거하지 않았습니다: " + entry);
+                    }
+                    if ((attributes & FileAttributes.Directory) != 0)
+                    {
+                        pending.Enqueue(entry);
+                    }
                 }
-                if ((attributes & FileAttributes.Directory) != 0)
+                catch (IOException ex)
                 {
-                    pending.Enqueue(entry);
+                    if (ex.Message.Contains("연결된"))
+                    {
+                        throw;
+                    }
+                }
+                catch
+                {
+                    // Locked or delete-pending files are ignored during reparse point check
                 }
             }
         }
@@ -741,16 +821,74 @@ internal static class Setup
         }
     }
 
+    private static void ForceClearFilePermissions(string path)
+    {
+        try
+        {
+            RunHidden("takeown.exe", "/F \"" + path + "\" /A");
+            RunHidden("icacls.exe", "\"" + path + "\" /grant *S-1-5-32-544:F /C /Q");
+        }
+        catch
+        {
+        }
+    }
+
     private static void CopyPayloadDirectory(string source, string destination)
     {
         Directory.CreateDirectory(destination);
         foreach (string file in Directory.GetFiles(source))
         {
-            File.Copy(file, Path.Combine(destination, Path.GetFileName(file)), true);
+            string destFile = Path.Combine(destination, Path.GetFileName(file));
+            CopyFileWithRetry(file, destFile);
         }
         foreach (string directory in Directory.GetDirectories(source))
         {
             CopyPayloadDirectory(directory, Path.Combine(destination, Path.GetFileName(directory)));
+        }
+    }
+
+    private static void CopyFileWithRetry(string sourceFile, string destFile)
+    {
+        if (File.Exists(destFile))
+        {
+            try
+            {
+                File.SetAttributes(destFile, FileAttributes.Normal);
+            }
+            catch
+            {
+                ForceClearFilePermissions(destFile);
+                try { File.SetAttributes(destFile, FileAttributes.Normal); } catch { }
+            }
+        }
+
+        try
+        {
+            File.Copy(sourceFile, destFile, true);
+            return;
+        }
+        catch
+        {
+            ForceClearFilePermissions(destFile);
+            try
+            {
+                File.Copy(sourceFile, destFile, true);
+                return;
+            }
+            catch
+            {
+                try
+                {
+                    string tempPath = destFile + "." + Guid.NewGuid().ToString("N") + ".deleteme";
+                    File.Move(destFile, tempPath);
+                    try { File.Delete(tempPath); } catch { }
+                }
+                catch
+                {
+                }
+
+                File.Copy(sourceFile, destFile, true);
+            }
         }
     }
 
@@ -763,10 +901,105 @@ internal static class Setup
 
         try
         {
+            CleanDirectoryContents(path);
             Directory.Delete(path, true);
         }
         catch
         {
+        }
+    }
+
+    private static void CleanDirectoryContents(string dirPath)
+    {
+        if (string.IsNullOrEmpty(dirPath) || !Directory.Exists(dirPath))
+        {
+            return;
+        }
+
+        try
+        {
+            ForceClearFilePermissions(dirPath);
+        }
+        catch
+        {
+        }
+
+        string[] files;
+        try
+        {
+            files = Directory.GetFiles(dirPath, "*", SearchOption.AllDirectories);
+        }
+        catch
+        {
+            files = Array.Empty<string>();
+        }
+
+        foreach (string file in files)
+        {
+            try
+            {
+                File.SetAttributes(file, FileAttributes.Normal);
+            }
+            catch
+            {
+                ForceClearFilePermissions(file);
+                try { File.SetAttributes(file, FileAttributes.Normal); } catch { }
+            }
+
+            try
+            {
+                File.Delete(file);
+            }
+            catch
+            {
+                try
+                {
+                    ForceClearFilePermissions(file);
+                    File.Delete(file);
+                }
+                catch
+                {
+                    try
+                    {
+                        string tempPath = file + "." + Guid.NewGuid().ToString("N") + ".deleteme";
+                        File.Move(file, tempPath);
+                        try { File.Delete(tempPath); } catch { }
+                    }
+                    catch
+                    {
+                        try
+                        {
+                            MoveFileExW(file, null, MoveFileDelayUntilReboot);
+                        }
+                        catch
+                        {
+                        }
+                    }
+                }
+            }
+        }
+
+        string[] subDirs;
+        try
+        {
+            subDirs = Directory.GetDirectories(dirPath, "*", SearchOption.AllDirectories)
+                .OrderByDescending(d => d.Length)
+                .ToArray();
+        }
+        catch
+        {
+            subDirs = Array.Empty<string>();
+        }
+
+        foreach (string subDir in subDirs)
+        {
+            try
+            {
+                Directory.Delete(subDir, false);
+            }
+            catch
+            {
+            }
         }
     }
 
@@ -777,28 +1010,40 @@ internal static class Setup
             return;
         }
 
-        Exception lastError = null;
-        for (int attempt = 0; attempt < 10; attempt++)
+        CleanDirectoryContents(path);
+
+        for (int attempt = 0; attempt < 5; attempt++)
         {
             try
             {
+                if (!Directory.Exists(path))
+                {
+                    return;
+                }
+
                 Directory.Delete(path, true);
                 return;
             }
-            catch (Exception ex)
+            catch
             {
-                lastError = ex;
                 StopAndDeleteService();
                 CleanupOldProcesses();
-                Thread.Sleep(700);
+                Thread.Sleep(300);
             }
         }
 
-        if (Directory.Exists(path))
+        try
         {
-            throw new IOException("\uC2E4\uD589 \uC911\uC778 \uD504\uB85C\uC138\uC2A4\uB97C \uC885\uB8CC\uD588\uC9C0\uB9CC \uC124\uCE58 \uD3F4\uB354\uB97C \uC0AD\uC81C\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. Windows App Protector \uD504\uB85C\uC138\uC2A4\uB97C \uC218\uB3D9\uC73C\uB85C \uC885\uB8CC\uD55C \uB4A4 \uB2E4\uC2DC \uC2E4\uD589\uD558\uC138\uC694.", lastError);
+            MoveFileExW(path, null, MoveFileDelayUntilReboot);
+        }
+        catch
+        {
         }
     }
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool MoveFileExW(string lpExistingFileName, string lpNewFileName, uint dwFlags);
+    private const uint MoveFileDelayUntilReboot = 0x00000004;
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int MessageBoxW(IntPtr hWnd, string text, string caption, uint type);

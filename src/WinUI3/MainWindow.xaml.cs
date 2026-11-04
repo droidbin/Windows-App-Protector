@@ -521,6 +521,7 @@ public sealed class MainWindow : Window
                 break;
             case "unlock-all":
                 await ViewModel.SetListedAppsEnabledAsync(false);
+                RestoreHiddenProtectedWindows();
                 break;
         }
     }
@@ -773,19 +774,27 @@ public sealed class MainWindow : Window
 
     private async Task ShowMessageDialogAsync(string title, string message)
     {
-        var dialog = new ContentDialog
+        try
         {
-            Title = title,
-            Content = new TextBlock
+            await EnsureContentXamlRootAsync();
+            var dialog = new ContentDialog
             {
-                Text = message,
-                TextWrapping = TextWrapping.Wrap,
-            },
-            CloseButtonText = "\uD655\uC778",
-            XamlRoot = ((FrameworkElement)Content).XamlRoot,
-        };
+                Title = title,
+                Content = new TextBlock
+                {
+                    Text = message,
+                    TextWrapping = TextWrapping.Wrap,
+                },
+                CloseButtonText = "확인",
+                XamlRoot = ((FrameworkElement)Content).XamlRoot ?? Content.XamlRoot,
+            };
 
-        await dialog.ShowAsync();
+            await dialog.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            App.WriteCrashLog(ex);
+        }
     }
 
     private static string GetCurrentVersionText()
@@ -805,15 +814,59 @@ public sealed class MainWindow : Window
     {
         EnsureMainWindowInterop();
         ShowWindow(hwnd, SwHide);
-        ViewModel.StatusText = "\uBC31\uADF8\uB77C\uC6B4\uB4DC\uC5D0\uC11C \uC2E4\uD589 \uC911\uC785\uB2C8\uB2E4. \uC228\uACA8\uC9C4 \uC544\uC774\uCF58\uC5D0\uC11C \uB2E4\uC2DC \uC5F4 \uC218 \uC788\uC2B5\uB2C8\uB2E4.";
+        ViewModel.StatusText = "백그라운드에서 실행 중입니다. 숨겨진 아이콘에서 다시 열 수 있습니다.";
+    }
+
+    private void ForceForegroundWindow(IntPtr targetHwnd)
+    {
+        if (targetHwnd == IntPtr.Zero)
+        {
+            return;
+        }
+
+        var foregroundHwnd = GetForegroundWindow();
+        if (foregroundHwnd != targetHwnd)
+        {
+            var foregroundThreadId = GetWindowThreadProcessId(foregroundHwnd, out _);
+            var currentThreadId = GetCurrentThreadId();
+
+            if (foregroundThreadId != 0 && foregroundThreadId != currentThreadId)
+            {
+                AttachThreadInput(foregroundThreadId, currentThreadId, true);
+                ShowWindow(targetHwnd, SwShow);
+                ShowWindow(targetHwnd, SwRestore);
+                BringWindowToTop(targetHwnd);
+                SetForegroundWindow(targetHwnd);
+                AttachThreadInput(foregroundThreadId, currentThreadId, false);
+            }
+            else
+            {
+                ShowWindow(targetHwnd, SwShow);
+                ShowWindow(targetHwnd, SwRestore);
+                BringWindowToTop(targetHwnd);
+                SetForegroundWindow(targetHwnd);
+            }
+        }
+        else
+        {
+            ShowWindow(targetHwnd, SwShow);
+            ShowWindow(targetHwnd, SwRestore);
+            BringWindowToTop(targetHwnd);
+        }
+
+        Activate();
     }
 
     private async Task ShowMainWindowAsync()
     {
         EnsureMainWindowInterop();
-        ShowWindow(hwnd, SwShow);
-        ShowWindow(hwnd, SwRestore);
-        Activate();
+        ForceForegroundWindow(hwnd);
+
+        if (isAuthenticating)
+        {
+            return;
+        }
+
         if (!await EnsureWindowAccessAsync(isInitialLaunch: false))
         {
             HideToTray();
@@ -823,7 +876,7 @@ public sealed class MainWindow : Window
     private async Task ToggleWindowVisibilityAsync()
     {
         EnsureMainWindowInterop();
-        if (IsWindowVisible(hwnd))
+        if (IsWindowVisible(hwnd) && !IsIconic(hwnd) && GetForegroundWindow() == hwnd && !isAuthenticating)
         {
             HideToTray();
             return;
@@ -843,9 +896,7 @@ public sealed class MainWindow : Window
         try
         {
             EnsureMainWindowInterop();
-            ShowWindow(hwnd, SwShow);
-            ShowWindow(hwnd, SwRestore);
-            Activate();
+            ForceForegroundWindow(hwnd);
 
             if (!ViewModel.HasAppPin)
             {
@@ -854,9 +905,37 @@ public sealed class MainWindow : Window
 
             return await ShowVerifyPinDialogAsync(isInitialLaunch);
         }
+        catch (Exception ex)
+        {
+            App.WriteCrashLog(ex);
+            return false;
+        }
         finally
         {
             isAuthenticating = false;
+        }
+    }
+
+    private async Task EnsureContentXamlRootAsync()
+    {
+        if (Content is FrameworkElement contentElement && contentElement.XamlRoot == null)
+        {
+            var tcs = new TaskCompletionSource<bool>();
+            RoutedEventHandler? loadedHandler = null;
+            loadedHandler = (s, e) =>
+            {
+                contentElement.Loaded -= loadedHandler;
+                tcs.TrySetResult(true);
+            };
+            contentElement.Loaded += loadedHandler;
+
+            if (contentElement.XamlRoot != null)
+            {
+                contentElement.Loaded -= loadedHandler;
+                tcs.TrySetResult(true);
+            }
+
+            await Task.WhenAny(tcs.Task, Task.Delay(1000));
         }
     }
 
@@ -897,17 +976,29 @@ public sealed class MainWindow : Window
             panel.Children.Add(pinBox);
             panel.Children.Add(confirmBox);
 
+            await EnsureContentXamlRootAsync();
+
             var dialog = new ContentDialog
             {
-                Title = "PIN \uC124\uC815",
+                Title = "PIN 설정",
                 Content = panel,
-                PrimaryButtonText = "\uC124\uC815",
-                CloseButtonText = "\uC885\uB8CC",
+                PrimaryButtonText = "설정",
+                CloseButtonText = "종료",
                 DefaultButton = ContentDialogButton.Primary,
-                XamlRoot = ((FrameworkElement)Content).XamlRoot,
+                XamlRoot = ((FrameworkElement)Content).XamlRoot ?? Content.XamlRoot,
             };
 
-            var result = await dialog.ShowAsync();
+            ContentDialogResult result;
+            try
+            {
+                result = await dialog.ShowAsync();
+            }
+            catch (Exception ex)
+            {
+                App.WriteCrashLog(ex);
+                return false;
+            }
+
             if (result != ContentDialogResult.Primary)
             {
                 return false;
@@ -915,20 +1006,22 @@ public sealed class MainWindow : Window
 
             if (pinBox.Password.Length < 4)
             {
-                errorText = "PIN\uC740 4\uC790\uB9AC \uC774\uC0C1\uC73C\uB85C \uC124\uC815\uD558\uC138\uC694.";
+                errorText = "PIN은 4자리 이상으로 설정하세요.";
                 ViewModel.StatusText = errorText;
+                await Task.Delay(100);
                 continue;
             }
 
             if (!string.Equals(pinBox.Password, confirmBox.Password, StringComparison.Ordinal))
             {
-                errorText = "PIN \uD655\uC778\uC774 \uC77C\uCE58\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.";
+                errorText = "PIN 확인이 일치하지 않습니다.";
                 ViewModel.StatusText = errorText;
+                await Task.Delay(100);
                 continue;
             }
 
             await ViewModel.SetAppPinAsync(pinBox.Password);
-            ViewModel.StatusText = "PIN\uC774 \uC124\uC815\uB418\uC5C8\uC2B5\uB2C8\uB2E4.";
+            ViewModel.StatusText = "PIN이 설정되었습니다.";
             return true;
         }
     }
@@ -942,15 +1035,15 @@ public sealed class MainWindow : Window
             var pinBox = new PasswordBox
             {
                 Header = "PIN",
-                PlaceholderText = "PIN \uC785\uB825",
+                PlaceholderText = "PIN 입력",
                 MaxLength = 32,
             };
             var panel = new StackPanel { Spacing = 12 };
             panel.Children.Add(new TextBlock
             {
                 Text = isInitialLaunch
-                    ? "\uC571\uC744 \uC5F4\uB824\uBA74 PIN\uC744 \uC785\uB825\uD558\uC138\uC694."
-                    : "\uBC31\uADF8\uB77C\uC6B4\uB4DC\uC5D0\uC11C \uB2E4\uC2DC \uC5F4\uB824\uBA74 PIN\uC744 \uC785\uB825\uD558\uC138\uC694.",
+                    ? "앱을 열려면 PIN을 입력하세요."
+                    : "백그라운드에서 다시 열려면 PIN을 입력하세요.",
                 TextWrapping = TextWrapping.Wrap,
                 Foreground = Brush(0x4C, 0x57, 0x66),
             });
@@ -965,17 +1058,29 @@ public sealed class MainWindow : Window
             }
             panel.Children.Add(pinBox);
 
+            await EnsureContentXamlRootAsync();
+
             var dialog = new ContentDialog
             {
-                Title = "\uC778\uC99D",
+                Title = "인증",
                 Content = panel,
-                PrimaryButtonText = "\uD655\uC778",
-                CloseButtonText = isInitialLaunch ? "\uC885\uB8CC" : "\uB2EB\uAE30",
+                PrimaryButtonText = "확인",
+                CloseButtonText = isInitialLaunch ? "종료" : "닫기",
                 DefaultButton = ContentDialogButton.Primary,
-                XamlRoot = ((FrameworkElement)Content).XamlRoot,
+                XamlRoot = ((FrameworkElement)Content).XamlRoot ?? Content.XamlRoot,
             };
 
-            var result = await dialog.ShowAsync();
+            ContentDialogResult result;
+            try
+            {
+                result = await dialog.ShowAsync();
+            }
+            catch (Exception ex)
+            {
+                App.WriteCrashLog(ex);
+                return false;
+            }
+
             if (result != ContentDialogResult.Primary)
             {
                 return false;
@@ -986,8 +1091,9 @@ public sealed class MainWindow : Window
                 return true;
             }
 
-            errorText = "PIN\uC774 \uC77C\uCE58\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.";
+            errorText = "PIN이 일치하지 않습니다.";
             ViewModel.StatusText = errorText;
+            await Task.Delay(100);
         }
     }
 
@@ -1047,6 +1153,9 @@ public sealed class MainWindow : Window
         IReadOnlySet<string> lockedPackageFamilies)
     {
         var ownProcessId = Environment.ProcessId;
+        var exeCache = new Dictionary<uint, string>();
+        var pfnCache = new Dictionary<uint, string>();
+
         EnumWindows((windowHandle, _) =>
         {
             if (windowHandle == hwnd || !IsWindowVisible(windowHandle))
@@ -1060,7 +1169,7 @@ public sealed class MainWindow : Window
                 return true;
             }
 
-            if (!IsProtectedWindow(windowHandle, processId, lockedExecutables, lockedPackageFamilies, out var matchedName))
+            if (!IsProtectedWindow(windowHandle, processId, lockedExecutables, lockedPackageFamilies, exeCache, pfnCache, out var matchedName))
             {
                 return true;
             }
@@ -1076,35 +1185,75 @@ public sealed class MainWindow : Window
         uint ownerProcessId,
         IReadOnlySet<string> lockedExecutables,
         IReadOnlySet<string> lockedPackageFamilies,
+        Dictionary<uint, string> exeCache,
+        Dictionary<uint, string> pfnCache,
         out string matchedName)
     {
-        var processIds = new HashSet<uint> { ownerProcessId };
+        if (IsProcessProtected(ownerProcessId, lockedExecutables, lockedPackageFamilies, exeCache, pfnCache, out matchedName))
+        {
+            return true;
+        }
+
+        var hasDifferentChildProcess = false;
+        var childProcessIds = new HashSet<uint>();
+
         EnumChildWindows(windowHandle, (childWindow, _) =>
         {
             GetWindowThreadProcessId(childWindow, out var childProcessId);
-            if (childProcessId != 0)
+            if (childProcessId != 0 && childProcessId != ownerProcessId)
             {
-                processIds.Add(childProcessId);
+                hasDifferentChildProcess = true;
+                childProcessIds.Add(childProcessId);
             }
 
             return true;
         }, IntPtr.Zero);
 
-        foreach (var processId in processIds)
+        if (hasDifferentChildProcess)
         {
-            var exeName = GetProcessExecutableName(processId);
-            if (!string.IsNullOrWhiteSpace(exeName) && lockedExecutables.Contains(exeName))
+            foreach (var processId in childProcessIds)
             {
-                matchedName = exeName;
-                return true;
+                if (IsProcessProtected(processId, lockedExecutables, lockedPackageFamilies, exeCache, pfnCache, out matchedName))
+                {
+                    return true;
+                }
             }
+        }
 
-            var packageFamilyName = GetProcessPackageFamilyName(processId);
-            if (!string.IsNullOrWhiteSpace(packageFamilyName) && lockedPackageFamilies.Contains(packageFamilyName))
-            {
-                matchedName = packageFamilyName;
-                return true;
-            }
+        matchedName = string.Empty;
+        return false;
+    }
+
+    private static bool IsProcessProtected(
+        uint processId,
+        IReadOnlySet<string> lockedExecutables,
+        IReadOnlySet<string> lockedPackageFamilies,
+        Dictionary<uint, string> exeCache,
+        Dictionary<uint, string> pfnCache,
+        out string matchedName)
+    {
+        if (!exeCache.TryGetValue(processId, out var exeName))
+        {
+            exeName = GetProcessExecutableName(processId);
+            exeCache[processId] = exeName;
+        }
+
+        if (!string.IsNullOrWhiteSpace(exeName) && lockedExecutables.Contains(exeName))
+        {
+            matchedName = exeName;
+            return true;
+        }
+
+        if (!pfnCache.TryGetValue(processId, out var packageFamilyName))
+        {
+            packageFamilyName = GetProcessPackageFamilyName(processId);
+            pfnCache[processId] = packageFamilyName;
+        }
+
+        if (!string.IsNullOrWhiteSpace(packageFamilyName) && lockedPackageFamilies.Contains(packageFamilyName))
+        {
+            matchedName = packageFamilyName;
+            return true;
         }
 
         matchedName = string.Empty;
@@ -1119,6 +1268,7 @@ public sealed class MainWindow : Window
             {
                 ShowWindow(windowHandle, SwShow);
                 ShowWindow(windowHandle, SwRestore);
+                BringWindowToTop(windowHandle);
             }
         }
 
@@ -1127,28 +1277,30 @@ public sealed class MainWindow : Window
 
     private static string GetProcessExecutableName(uint processId)
     {
+        var handle = OpenProcess(ProcessQueryLimitedInformation, false, processId);
+        if (handle == IntPtr.Zero)
+        {
+            return string.Empty;
+        }
+
         try
         {
-            using var process = Process.GetProcessById((int)processId);
-            try
+            var capacity = 1024;
+            var buffer = new StringBuilder(capacity);
+            if (QueryFullProcessImageNameW(handle, 0, buffer, ref capacity))
             {
-                var fileName = process.MainModule?.FileName;
-                if (!string.IsNullOrWhiteSpace(fileName))
-                {
-                    return Path.GetFileName(fileName);
-                }
-            }
-            catch
-            {
+                return Path.GetFileName(buffer.ToString());
             }
 
-            return process.ProcessName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
-                ? process.ProcessName
-                : process.ProcessName + ".exe";
+            return string.Empty;
         }
         catch
         {
             return string.Empty;
+        }
+        finally
+        {
+            CloseHandle(handle);
         }
     }
 
@@ -1394,6 +1546,15 @@ public sealed class MainWindow : Window
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
 
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool QueryFullProcessImageNameW(IntPtr hProcess, int dwFlags, StringBuilder lpExeName, ref int lpdwSize);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
+    private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
     [DllImport("kernel32.dll")]
     private static extern bool CloseHandle(IntPtr hObject);
 
@@ -1444,6 +1605,18 @@ public sealed class MainWindow : Window
 
     [DllImport("user32.dll")]
     private static extern bool GetLastInputInfo(ref LastInputInfo plii);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool BringWindowToTop(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr hWnd);
 
     [DllImport("comdlg32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool GetOpenFileName([In, Out] OpenFileName lpofn);

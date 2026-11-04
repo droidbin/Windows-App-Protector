@@ -28,7 +28,7 @@ public partial class App : Application
 
         if (Environment.GetCommandLineArgs().Any(arg => string.Equals(arg, "--blocked", StringComparison.OrdinalIgnoreCase)))
         {
-            MessageBoxW(IntPtr.Zero, "\uC774 \uC571\uC740 Windows App Protector\uC5D0 \uC758\uD574 \uCC28\uB2E8\uB418\uC5C8\uC2B5\uB2C8\uB2E4.", "Windows App Protector", 0x00000030);
+            MessageBoxW(IntPtr.Zero, "이 앱은 Windows App Protector에 의해 차단되었습니다.", "Windows App Protector", 0x00000030);
             Exit();
             return;
         }
@@ -43,6 +43,7 @@ public partial class App : Application
     private static void App_UnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
     {
         WriteCrashLog(e.Exception);
+        e.Handled = true;
     }
 
     internal static void WriteCrashLog(Exception exception)
@@ -63,5 +64,4 @@ public partial class App : Application
         {
         }
     }
-
 }

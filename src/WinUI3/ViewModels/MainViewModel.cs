@@ -17,6 +17,7 @@ public class MainViewModel : ObservableObject
     private string statusText = "\uC7A0\uAE08 \uC0C1\uD0DC: \uB300\uAE30";
     private string hotkeyValidationMessage = string.Empty;
     private bool canSaveHotkeys = true;
+    private bool autoLockSuppressedUntilActive;
     private ProtectedAppViewModel? selectedApp;
 
     public MainViewModel()
@@ -373,6 +374,10 @@ public class MainViewModel : ObservableObject
         }
 
         var locking = !model.Enabled;
+        if (!locking)
+        {
+            autoLockSuppressedUntilActive = true;
+        }
         var closeResult = locking
             ? await CloseAppsBeforeLockAsync(new[] { model })
             : null;
@@ -386,6 +391,11 @@ public class MainViewModel : ObservableObject
 
     public async Task SetListedAppsEnabledAsync(bool enabled)
     {
+        if (!enabled)
+        {
+            autoLockSuppressedUntilActive = true;
+        }
+
         ProtectedAppProcessCloseResult? closeResult = enabled
             ? await CloseAppsBeforeLockAsync(config.ProtectedApps)
             : null;
@@ -426,7 +436,18 @@ public class MainViewModel : ObservableObject
 
     public async Task<bool> AutoLockIfIdleAsync(TimeSpan idleTime)
     {
-        if (config.IdleLockMinutes <= 0 ||
+        if (config.IdleLockMinutes <= 0)
+        {
+            return false;
+        }
+
+        // When the user becomes active (idle time under 30 seconds), re-arm idle locking
+        if (idleTime < TimeSpan.FromSeconds(30))
+        {
+            autoLockSuppressedUntilActive = false;
+        }
+
+        if (autoLockSuppressedUntilActive ||
             idleTime < TimeSpan.FromMinutes(config.IdleLockMinutes) ||
             config.ProtectedApps.Count == 0 ||
             config.ProtectedApps.All(app => app.Enabled))

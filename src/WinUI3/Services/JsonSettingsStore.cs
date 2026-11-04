@@ -103,41 +103,43 @@ public sealed class JsonSettingsStore : ISettingsStore
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         var tempPath = path + ".tmp";
-        try
+        for (var attempt = 0; attempt < 3; attempt++)
         {
-            await using (var stream = File.Create(tempPath))
+            try
             {
-                await JsonSerializer.SerializeAsync(stream, config, JsonOptions, cancellationToken);
-            }
+                await using (var stream = File.Create(tempPath))
+                {
+                    await JsonSerializer.SerializeAsync(stream, config, JsonOptions, cancellationToken);
+                }
 
-            if (File.Exists(path))
-            {
-                File.Replace(tempPath, path, null);
+                if (File.Exists(path))
+                {
+                    File.Replace(tempPath, path, null);
+                }
+                else
+                {
+                    File.Move(tempPath, path);
+                }
+                return;
             }
-            else
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                File.Move(tempPath, path);
-            }
-        }
-        catch (UnauthorizedAccessException) when (File.Exists(path))
-        {
-            if (File.Exists(tempPath))
-            {
-                File.Delete(tempPath);
-            }
+                if (File.Exists(tempPath))
+                {
+                    try { File.Delete(tempPath); } catch { }
+                }
 
-            await using var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read);
-            await JsonSerializer.SerializeAsync(stream, config, JsonOptions, cancellationToken);
-        }
-        catch (IOException) when (File.Exists(path))
-        {
-            if (File.Exists(tempPath))
-            {
-                File.Delete(tempPath);
+                try
+                {
+                    await using var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.ReadWrite);
+                    await JsonSerializer.SerializeAsync(stream, config, JsonOptions, cancellationToken);
+                    return;
+                }
+                catch when (attempt < 2)
+                {
+                    await Task.Delay(50, cancellationToken);
+                }
             }
-
-            await using var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read);
-            await JsonSerializer.SerializeAsync(stream, config, JsonOptions, cancellationToken);
         }
     }
 
