@@ -50,6 +50,10 @@ public sealed class MainWindow : Window
     private const uint ImageIcon = 1;
     private const uint LrLoadFromFile = 0x0010;
     private const uint LrDefaultSize = 0x0040;
+    private const int WmShowRequest = 0x8000 + 0x10;
+    private const int MaxPinAttemptsBeforeLockout = 5;
+    private static readonly TimeSpan BasePinLockout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan MaxPinLockout = TimeSpan.FromMinutes(15);
     private const string MessageWindowClassName = "WindowsAppProtectorMessageWindow";
     private static readonly IntPtr HwndMessage = new(-3);
     private static readonly IntPtr IdiApplication = new(32512);
@@ -73,21 +77,42 @@ public sealed class MainWindow : Window
     private AppWindow? appWindow;
     private SettingsWindow? settingsWindow;
     private int nextHotkeyId = 100;
+    private readonly bool startInBackground;
+    private readonly Grid shellRoot = new();
+    private FrameworkElement? mainContent;
+    private FrameworkElement? lockedPlaceholder;
+    private Task<bool>? pendingAuthentication;
+    private bool isSessionUnlocked;
+    private bool hasCheckedUpdatesAfterUnlock;
+    private ContentDialog? activeDialog;
+    private Task activeDialogClosed = Task.CompletedTask;
+    private int failedPinAttempts;
+    private DateTimeOffset pinLockoutUntil = DateTimeOffset.MinValue;
 
     public MainViewModel ViewModel { get; } = new();
 
-    public MainWindow()
+    public MainWindow(bool startInBackground = false)
     {
+        this.startInBackground = startInBackground;
         messageWndProcDelegate = MessageWndProc;
         messageWindowHandle = CreateMessageWindow();
         Title = "Windows App Protector";
         Activated += MainWindow_Activated;
         Closed += MainWindow_Closed;
         AddTrayIcon();
-        Content = BuildContent();
+        Content = BuildShell();
         windowGuardTimer.Tick += WindowGuardTimer_Tick;
         windowGuardTimer.Start();
         _ = InitializeAsync();
+    }
+
+    internal static void SignalRunningInstance()
+    {
+        var existing = FindWindowEx(HwndMessage, IntPtr.Zero, MessageWindowClassName, null);
+        if (existing != IntPtr.Zero)
+        {
+            PostMessage(existing, WmShowRequest, IntPtr.Zero, IntPtr.Zero);
+        }
     }
 
     private void MainWindow_Activated(object sender, WindowActivatedEventArgs args)
@@ -97,15 +122,99 @@ public sealed class MainWindow : Window
 
     private async Task InitializeAsync()
     {
-        await ViewModel.InitializeAsync();
-        RegisterConfiguredHotkeys();
-        if (!await EnsureWindowAccessAsync(isInitialLaunch: true))
+        try
         {
-            ExitApplication();
+            await ViewModel.InitializeAsync();
+        }
+        catch (Exception ex)
+        {
+            App.WriteCrashLog(ex);
+            ViewModel.StatusText = $"설정을 불러오지 못했습니다: {ex.Message}";
+        }
+
+        RegisterConfiguredHotkeys();
+
+        if (startInBackground)
+        {
+            // Started at logon: keep protecting from the tray and ask for the PIN only when opened.
+            HideToTray();
             return;
         }
 
-        _ = CheckForUpdatesAsync(showNoUpdateMessage: false);
+        // A failed or cancelled PIN only hides the window; protection keeps running in the background.
+        if (!await EnsureWindowAccessAsync(isInitialLaunch: true))
+        {
+            HideToTray();
+        }
+    }
+
+    private FrameworkElement BuildShell()
+    {
+        mainContent = BuildContent();
+        mainContent.Visibility = Visibility.Collapsed;
+
+        var placeholder = new StackPanel
+        {
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            Spacing = 10,
+        };
+        placeholder.Children.Add(new FontIcon { Glyph = "", FontSize = 36, Foreground = Brush(0x1F, 0x6B, 0x50) });
+        placeholder.Children.Add(new TextBlock
+        {
+            Text = "Windows App Protector가 잠겨 있습니다.",
+            FontSize = 15,
+            Foreground = Brush(0x1C, 0x2B, 0x25),
+            HorizontalAlignment = HorizontalAlignment.Center,
+        });
+        lockedPlaceholder = placeholder;
+
+        shellRoot.Background = Brush(0xF4, 0xF7, 0xF5);
+        shellRoot.Children.Add(mainContent);
+        shellRoot.Children.Add(lockedPlaceholder);
+        return shellRoot;
+    }
+
+    private void SetSessionUnlocked(bool unlocked)
+    {
+        isSessionUnlocked = unlocked;
+        if (mainContent is not null)
+        {
+            mainContent.Visibility = unlocked ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        if (lockedPlaceholder is not null)
+        {
+            lockedPlaceholder.Visibility = unlocked ? Visibility.Collapsed : Visibility.Visible;
+        }
+    }
+
+    private async Task<ContentDialogResult> ShowContentDialogAsync(ContentDialog dialog)
+    {
+        // WinUI allows one open ContentDialog per XamlRoot; close the previous one instead of failing.
+        if (activeDialog is not null)
+        {
+            activeDialog.Hide();
+            await Task.WhenAny(activeDialogClosed, Task.Delay(1000));
+        }
+
+        var closed = new TaskCompletionSource();
+        dialog.Closed += (_, _) => closed.TrySetResult();
+        activeDialog = dialog;
+        activeDialogClosed = closed.Task;
+        try
+        {
+            return await dialog.ShowAsync();
+        }
+        finally
+        {
+            if (ReferenceEquals(activeDialog, dialog))
+            {
+                activeDialog = null;
+            }
+
+            closed.TrySetResult();
+        }
     }
 
     private FrameworkElement BuildContent()
@@ -407,7 +516,7 @@ public sealed class MainWindow : Window
                 XamlRoot = ((FrameworkElement)Content).XamlRoot,
             };
 
-            var result = await dialog.ShowAsync();
+            var result = await ShowContentDialogAsync(dialog);
             if (result == ContentDialogResult.Primary && list.SelectedItems.Count > 0)
             {
                 foreach (var selected in list.SelectedItems.OfType<PackagedAppInfo>().ToArray())
@@ -496,17 +605,35 @@ public sealed class MainWindow : Window
     {
         if (message == WmTrayIcon && (lParam.ToInt32() == WmLButtonDblClk || lParam.ToInt32() == WmRButtonUp))
         {
-            _ = ShowMainWindowAsync();
+            _ = RunLoggedAsync(ShowMainWindowAsync);
+            return IntPtr.Zero;
+        }
+
+        if (message == WmShowRequest)
+        {
+            _ = RunLoggedAsync(ShowMainWindowAsync);
             return IntPtr.Zero;
         }
 
         if (message == WmHotkey && registeredHotkeys.TryGetValue(wParam.ToInt32(), out var actionKey))
         {
-            _ = ExecuteHotkeyActionAsync(actionKey);
+            _ = RunLoggedAsync(() => ExecuteHotkeyActionAsync(actionKey));
             return IntPtr.Zero;
         }
 
         return DefWindowProc(windowHandle, message, wParam, lParam);
+    }
+
+    private static async Task RunLoggedAsync(Func<Task> action)
+    {
+        try
+        {
+            await action();
+        }
+        catch (Exception ex)
+        {
+            App.WriteCrashLog(ex);
+        }
     }
 
     private async Task ExecuteHotkeyActionAsync(string actionKey)
@@ -520,6 +647,16 @@ public sealed class MainWindow : Window
                 await ViewModel.SetListedAppsEnabledAsync(true);
                 break;
             case "unlock-all":
+                // Unlocking is a privileged action: require the PIN unless the window is already unlocked.
+                if (!isSessionUnlocked)
+                {
+                    await ShowMainWindowAsync();
+                    if (!isSessionUnlocked)
+                    {
+                        return;
+                    }
+                }
+
                 await ViewModel.SetListedAppsEnabledAsync(false);
                 RestoreHiddenProtectedWindows();
                 break;
@@ -752,7 +889,7 @@ public sealed class MainWindow : Window
             XamlRoot = ((FrameworkElement)Content).XamlRoot,
         };
 
-        var result = await dialog.ShowAsync();
+        var result = await ShowContentDialogAsync(dialog);
         if (result != ContentDialogResult.Primary)
         {
             return;
@@ -789,7 +926,7 @@ public sealed class MainWindow : Window
                 XamlRoot = ((FrameworkElement)Content).XamlRoot ?? Content.XamlRoot,
             };
 
-            await dialog.ShowAsync();
+            await ShowContentDialogAsync(dialog);
         }
         catch (Exception ex)
         {
@@ -813,6 +950,10 @@ public sealed class MainWindow : Window
     private void HideToTray()
     {
         EnsureMainWindowInterop();
+        // Hiding always ends the unlocked session: the next open asks for the PIN again.
+        SetSessionUnlocked(false);
+        activeDialog?.Hide();
+        settingsWindow?.Close();
         ShowWindow(hwnd, SwHide);
         ViewModel.StatusText = "백그라운드에서 실행 중입니다. 숨겨진 아이콘에서 다시 열 수 있습니다.";
     }
@@ -824,36 +965,16 @@ public sealed class MainWindow : Window
             return;
         }
 
-        var foregroundHwnd = GetForegroundWindow();
-        if (foregroundHwnd != targetHwnd)
+        // Tray clicks and WM_HOTKEY already grant foreground rights. AttachThreadInput is avoided
+        // because it ties this UI thread to a possibly hung foreground application.
+        ShowWindow(targetHwnd, SwShow);
+        if (IsIconic(targetHwnd))
         {
-            var foregroundThreadId = GetWindowThreadProcessId(foregroundHwnd, out _);
-            var currentThreadId = GetCurrentThreadId();
-
-            if (foregroundThreadId != 0 && foregroundThreadId != currentThreadId)
-            {
-                AttachThreadInput(foregroundThreadId, currentThreadId, true);
-                ShowWindow(targetHwnd, SwShow);
-                ShowWindow(targetHwnd, SwRestore);
-                BringWindowToTop(targetHwnd);
-                SetForegroundWindow(targetHwnd);
-                AttachThreadInput(foregroundThreadId, currentThreadId, false);
-            }
-            else
-            {
-                ShowWindow(targetHwnd, SwShow);
-                ShowWindow(targetHwnd, SwRestore);
-                BringWindowToTop(targetHwnd);
-                SetForegroundWindow(targetHwnd);
-            }
-        }
-        else
-        {
-            ShowWindow(targetHwnd, SwShow);
             ShowWindow(targetHwnd, SwRestore);
-            BringWindowToTop(targetHwnd);
         }
 
+        BringWindowToTop(targetHwnd);
+        SetForegroundWindow(targetHwnd);
         Activate();
     }
 
@@ -862,7 +983,7 @@ public sealed class MainWindow : Window
         EnsureMainWindowInterop();
         ForceForegroundWindow(hwnd);
 
-        if (isAuthenticating)
+        if (isSessionUnlocked)
         {
             return;
         }
@@ -885,34 +1006,50 @@ public sealed class MainWindow : Window
         await ShowMainWindowAsync();
     }
 
-    private async Task<bool> EnsureWindowAccessAsync(bool isInitialLaunch)
+    private Task<bool> EnsureWindowAccessAsync(bool isInitialLaunch)
     {
-        if (isAuthenticating)
+        // Concurrent callers (tray click, hotkey, startup) share one PIN prompt instead of
+        // the late caller receiving a spurious failure.
+        var authentication = pendingAuthentication ??= AuthenticateAsync(isInitialLaunch);
+        if (authentication.IsCompleted)
         {
-            return false;
+            // Finished synchronously (its finally ran before the assignment); never cache a result.
+            pendingAuthentication = null;
         }
 
+        return authentication;
+    }
+
+    private async Task<bool> AuthenticateAsync(bool isInitialLaunch)
+    {
         isAuthenticating = true;
         try
         {
             EnsureMainWindowInterop();
             ForceForegroundWindow(hwnd);
 
-            if (!ViewModel.HasAppPin)
+            var authenticated = ViewModel.HasAppPin
+                ? await ShowVerifyPinDialogAsync(isInitialLaunch)
+                : await ShowCreatePinDialogAsync();
+            SetSessionUnlocked(authenticated);
+            if (authenticated && !hasCheckedUpdatesAfterUnlock)
             {
-                return await ShowCreatePinDialogAsync();
+                hasCheckedUpdatesAfterUnlock = true;
+                _ = RunLoggedAsync(() => CheckForUpdatesAsync(showNoUpdateMessage: false));
             }
 
-            return await ShowVerifyPinDialogAsync(isInitialLaunch);
+            return authenticated;
         }
         catch (Exception ex)
         {
             App.WriteCrashLog(ex);
+            SetSessionUnlocked(false);
             return false;
         }
         finally
         {
             isAuthenticating = false;
+            pendingAuthentication = null;
         }
     }
 
@@ -983,7 +1120,7 @@ public sealed class MainWindow : Window
                 Title = "PIN 설정",
                 Content = panel,
                 PrimaryButtonText = "설정",
-                CloseButtonText = "종료",
+                CloseButtonText = "닫기",
                 DefaultButton = ContentDialogButton.Primary,
                 XamlRoot = ((FrameworkElement)Content).XamlRoot ?? Content.XamlRoot,
             };
@@ -991,7 +1128,7 @@ public sealed class MainWindow : Window
             ContentDialogResult result;
             try
             {
-                result = await dialog.ShowAsync();
+                result = await ShowContentDialogAsync(dialog);
             }
             catch (Exception ex)
             {
@@ -1065,7 +1202,7 @@ public sealed class MainWindow : Window
                 Title = "인증",
                 Content = panel,
                 PrimaryButtonText = "확인",
-                CloseButtonText = isInitialLaunch ? "종료" : "닫기",
+                CloseButtonText = "닫기",
                 DefaultButton = ContentDialogButton.Primary,
                 XamlRoot = ((FrameworkElement)Content).XamlRoot ?? Content.XamlRoot,
             };
@@ -1073,7 +1210,7 @@ public sealed class MainWindow : Window
             ContentDialogResult result;
             try
             {
-                result = await dialog.ShowAsync();
+                result = await ShowContentDialogAsync(dialog);
             }
             catch (Exception ex)
             {
@@ -1086,13 +1223,35 @@ public sealed class MainWindow : Window
                 return false;
             }
 
+            var lockoutRemaining = pinLockoutUntil - DateTimeOffset.Now;
+            if (lockoutRemaining > TimeSpan.Zero)
+            {
+                errorText = $"PIN 입력 오류가 반복되었습니다. {Math.Ceiling(lockoutRemaining.TotalSeconds):0}초 후 다시 시도하세요.";
+                await Task.Delay(100);
+                continue;
+            }
+
             if (ViewModel.VerifyAppPin(pinBox.Password))
             {
+                failedPinAttempts = 0;
+                pinLockoutUntil = DateTimeOffset.MinValue;
                 return true;
             }
 
-            errorText = "PIN이 일치하지 않습니다.";
-            ViewModel.StatusText = errorText;
+            failedPinAttempts++;
+            if (failedPinAttempts >= MaxPinAttemptsBeforeLockout)
+            {
+                // 30s, 60s, 120s ... capped at 15 minutes for each further failure.
+                var exponent = Math.Min(failedPinAttempts - MaxPinAttemptsBeforeLockout, 10);
+                var lockout = TimeSpan.FromTicks(Math.Min(BasePinLockout.Ticks << exponent, MaxPinLockout.Ticks));
+                pinLockoutUntil = DateTimeOffset.Now + lockout;
+                errorText = $"PIN이 {failedPinAttempts}회 일치하지 않았습니다. {lockout.TotalSeconds:0}초 동안 입력할 수 없습니다.";
+            }
+            else
+            {
+                errorText = $"PIN이 일치하지 않습니다. ({failedPinAttempts}/{MaxPinAttemptsBeforeLockout})";
+            }
+
             await Task.Delay(100);
         }
     }
@@ -1107,7 +1266,15 @@ public sealed class MainWindow : Window
                 isAutoLockCheckRunning = true;
                 try
                 {
-                    await ViewModel.AutoLockIfIdleAsync(GetSystemIdleTime());
+                    var idleTime = GetSystemIdleTime();
+                    await ViewModel.AutoLockIfIdleAsync(idleTime);
+                    if (isSessionUnlocked &&
+                        ViewModel.IdleLockMinutes > 0 &&
+                        idleTime >= TimeSpan.FromMinutes(ViewModel.IdleLockMinutes))
+                    {
+                        // An unattended, unlocked management window is locked by the same idle timeout.
+                        HideToTray();
+                    }
                 }
                 finally
                 {
@@ -1550,12 +1717,6 @@ public sealed class MainWindow : Window
     private static extern bool QueryFullProcessImageNameW(IntPtr hProcess, int dwFlags, StringBuilder lpExeName, ref int lpdwSize);
 
     [DllImport("kernel32.dll")]
-    private static extern uint GetCurrentThreadId();
-
-    [DllImport("user32.dll")]
-    private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
-
-    [DllImport("kernel32.dll")]
     private static extern bool CloseHandle(IntPtr hObject);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
@@ -1602,6 +1763,12 @@ public sealed class MainWindow : Window
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool DestroyWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr FindWindowEx(IntPtr hWndParent, IntPtr hWndChildAfter, string lpszClass, string? lpszWindow);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
     [DllImport("user32.dll")]
     private static extern bool GetLastInputInfo(ref LastInputInfo plii);

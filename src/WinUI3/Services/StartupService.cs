@@ -1,5 +1,6 @@
 using Microsoft.Win32;
 using System.Diagnostics;
+using System.Security;
 
 namespace WindowsAppProtector.Services;
 
@@ -40,31 +41,83 @@ public static class StartupService
             ?? throw new InvalidOperationException("현재 실행 파일 경로를 확인할 수 없습니다.");
     }
 
-    private static string Quote(string value)
-    {
-        return "\"" + value.Replace("\"", "\\\"") + "\"";
-    }
-
     private static void CreateStartupTask(string executablePath)
     {
-        var result = RunSchtasks(
-            "/Create",
-            "/TN",
-            TaskName,
-            "/TR",
-            Quote(executablePath),
-            "/SC",
-            "ONLOGON",
-            "/RL",
-            "HIGHEST",
-            "/F");
-        if (result.ExitCode != 0)
+        // schtasks /SC ONLOGON defaults stop the task on battery power, kill it after 72 hours,
+        // and run it at below-normal priority. Register from XML so the protector stays resident.
+        var xmlPath = Path.Combine(Path.GetTempPath(), $"wap-startup-{Guid.NewGuid():N}.xml");
+        try
         {
-            throw new InvalidOperationException(
-                string.IsNullOrWhiteSpace(result.Error)
-                    ? "시작프로그램 예약 작업을 만들 수 없습니다."
-                    : result.Error.Trim());
+            File.WriteAllText(xmlPath, BuildStartupTaskXml(executablePath), System.Text.Encoding.Unicode);
+            var result = RunSchtasks("/Create", "/TN", TaskName, "/XML", xmlPath, "/F");
+            if (result.ExitCode != 0)
+            {
+                throw new InvalidOperationException(
+                    string.IsNullOrWhiteSpace(result.Error)
+                        ? "시작프로그램 예약 작업을 만들 수 없습니다."
+                        : result.Error.Trim());
+            }
         }
+        finally
+        {
+            try { File.Delete(xmlPath); } catch { }
+        }
+    }
+
+    internal static string BuildStartupTaskXml(string executablePath)
+    {
+        using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+        var userSid = identity.User?.Value
+            ?? throw new InvalidOperationException("현재 사용자 SID를 확인할 수 없습니다.");
+        var command = SecurityElement.Escape(executablePath);
+        var user = SecurityElement.Escape(userSid);
+
+        return $"""
+            <?xml version="1.0" encoding="UTF-16"?>
+            <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+              <RegistrationInfo>
+                <Description>Windows App Protector background protection</Description>
+              </RegistrationInfo>
+              <Triggers>
+                <LogonTrigger>
+                  <Enabled>true</Enabled>
+                  <UserId>{user}</UserId>
+                </LogonTrigger>
+              </Triggers>
+              <Principals>
+                <Principal id="Author">
+                  <UserId>{user}</UserId>
+                  <LogonType>InteractiveToken</LogonType>
+                  <RunLevel>HighestAvailable</RunLevel>
+                </Principal>
+              </Principals>
+              <Settings>
+                <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+                <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+                <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+                <AllowHardTerminate>true</AllowHardTerminate>
+                <StartWhenAvailable>false</StartWhenAvailable>
+                <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+                <IdleSettings>
+                  <StopOnIdleEnd>false</StopOnIdleEnd>
+                  <RestartOnIdle>false</RestartOnIdle>
+                </IdleSettings>
+                <AllowStartOnDemand>true</AllowStartOnDemand>
+                <Enabled>true</Enabled>
+                <Hidden>false</Hidden>
+                <RunOnlyIfIdle>false</RunOnlyIfIdle>
+                <WakeToRun>false</WakeToRun>
+                <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+                <Priority>4</Priority>
+              </Settings>
+              <Actions Context="Author">
+                <Exec>
+                  <Command>{command}</Command>
+                  <Arguments>{App.BackgroundArgument}</Arguments>
+                </Exec>
+              </Actions>
+            </Task>
+            """;
     }
 
     private static void DeleteStartupTask()

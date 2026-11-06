@@ -590,13 +590,20 @@ public class MainViewModel : ObservableObject
 
     private void SyncStartupPreference()
     {
-        try
+        // Re-registers the logon task on every start (migrates older tasks to the fixed settings)
+        // off the UI thread so schtasks.exe never delays the PIN prompt.
+        var startWithWindows = config.StartWithWindows;
+        _ = Task.Run(() =>
         {
-            StartupService.SetEnabled(config.StartWithWindows);
-        }
-        catch
-        {
-        }
+            try
+            {
+                StartupService.SetEnabled(startWithWindows);
+            }
+            catch (Exception ex)
+            {
+                App.WriteCrashLog(ex);
+            }
+        });
     }
 
     private void RefreshApps()
