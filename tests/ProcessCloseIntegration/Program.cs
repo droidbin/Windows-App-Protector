@@ -67,9 +67,11 @@ internal static class Program
             var graceful = Start("graceful");
             var empty = await service.CloseRunningAppsAsync(Array.Empty<ProtectedApp>());
             Assert(empty == new ProtectedAppProcessCloseResult(0, 0) && !graceful.HasExited, "Empty target list closed an app");
-            var packaged = await service.CloseRunningAppsAsync(new[] { new ProtectedApp { Path = exe, IsPackaged = true } });
+            // ExecutableName is set as the app always does, so name-based matching would be caught here.
+            var exeName = Path.GetFileName(exe);
+            var packaged = await service.CloseRunningAppsAsync(new[] { new ProtectedApp { Path = exe, IsPackaged = true, ExecutableName = exeName } });
             Assert(packaged == new ProtectedAppProcessCloseResult(0, 0) && !graceful.HasExited, "Packaged app was closed");
-            var otherPath = await service.CloseRunningAppsAsync(new[] { new ProtectedApp { Path = Path.Combine(temp, Path.GetFileName(exe)) } });
+            var otherPath = await service.CloseRunningAppsAsync(new[] { new ProtectedApp { Path = Path.Combine(temp, exeName), ExecutableName = exeName } });
             Assert(otherPath == new ProtectedAppProcessCloseResult(0, 0) && !graceful.HasExited, "Filename-only match closed an unrelated path");
             results.Add(new { scenario = "empty-packaged-and-other-path", passed = true });
 

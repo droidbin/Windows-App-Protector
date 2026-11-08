@@ -10,3 +10,6 @@ TestResults/
 *.log
 *.tmp
 *.bak
+
+# Beta binaries are published as GitHub Release assets only (docs/ROADMAP-NEXT.md section 4).
+dist/releases/*-beta.*/

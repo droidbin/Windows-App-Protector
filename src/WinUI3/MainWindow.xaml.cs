@@ -33,6 +33,9 @@ public sealed class MainWindow : Window
     private const int SwHide = 0;
     private const int SwShow = 5;
     private const int SwRestore = 9;
+    private const int SwShowNa = 8;
+    private const int WsExToolWindow = 0x00000080;
+    private const uint MsgFltAllow = 1;
     private const uint ProcessQueryLimitedInformation = 0x1000;
     private const int ErrorInsufficientBuffer = 122;
     private const int OfnNoChangeDir = 0x00000008;
@@ -55,12 +58,17 @@ public sealed class MainWindow : Window
     private static readonly TimeSpan BasePinLockout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan MaxPinLockout = TimeSpan.FromMinutes(15);
     private const string MessageWindowClassName = "WindowsAppProtectorMessageWindow";
-    private static readonly IntPtr HwndMessage = new(-3);
     private static readonly IntPtr IdiApplication = new(32512);
 
     private readonly ListView appList = new() { SelectionMode = ListViewSelectionMode.Multiple };
     private readonly Dictionary<int, string> registeredHotkeys = new();
     private readonly HashSet<IntPtr> hiddenProtectedWindows = new();
+    private readonly Dictionary<IntPtr, uint> hiddenWindowOwners = new();
+    private readonly string hiddenWindowsStatePath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "WindowsAppProtector.WinUI",
+        "hidden-windows.json");
+    private readonly uint taskbarCreatedMessage = RegisterWindowMessage("TaskbarCreated");
     private readonly GitHubUpdateService updateService = new();
     private readonly DispatcherTimer windowGuardTimer = new() { Interval = TimeSpan.FromMilliseconds(700) };
     private readonly WndProcDelegate messageWndProcDelegate;
@@ -101,6 +109,7 @@ public sealed class MainWindow : Window
         Closed += MainWindow_Closed;
         AddTrayIcon();
         Content = BuildShell();
+        LoadHiddenWindows();
         windowGuardTimer.Tick += WindowGuardTimer_Tick;
         windowGuardTimer.Start();
         _ = InitializeAsync();
@@ -108,7 +117,7 @@ public sealed class MainWindow : Window
 
     internal static void SignalRunningInstance()
     {
-        var existing = FindWindowEx(HwndMessage, IntPtr.Zero, MessageWindowClassName, null);
+        var existing = FindWindowEx(IntPtr.Zero, IntPtr.Zero, MessageWindowClassName, null);
         if (existing != IntPtr.Zero)
         {
             PostMessage(existing, WmShowRequest, IntPtr.Zero, IntPtr.Zero);
@@ -609,6 +618,14 @@ public sealed class MainWindow : Window
             return IntPtr.Zero;
         }
 
+        if (taskbarCreatedMessage != 0 && message == taskbarCreatedMessage)
+        {
+            // Explorer restarted: the old notification icon is gone, add it again.
+            trayIconAdded = false;
+            EnsureTrayIcon();
+            return IntPtr.Zero;
+        }
+
         if (message == WmShowRequest)
         {
             _ = RunLoggedAsync(ShowMainWindowAsync);
@@ -716,8 +733,10 @@ public sealed class MainWindow : Window
             throw new InvalidOperationException("\uB2E8\uCD95\uD0A4 \uBA54\uC2DC\uC9C0 \uCC3D\uC744 \uB4F1\uB85D\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
         }
 
+        // A hidden top-level window (never shown) instead of HWND_MESSAGE: message-only windows
+        // do not receive the TaskbarCreated broadcast sent when Explorer restarts.
         var handle = CreateWindowEx(
-            0,
+            WsExToolWindow,
             MessageWindowClassName,
             string.Empty,
             0,
@@ -725,7 +744,7 @@ public sealed class MainWindow : Window
             0,
             0,
             0,
-            HwndMessage,
+            IntPtr.Zero,
             IntPtr.Zero,
             instance,
             IntPtr.Zero);
@@ -735,6 +754,13 @@ public sealed class MainWindow : Window
             throw new InvalidOperationException("\uB2E8\uCD95\uD0A4 \uBA54\uC2DC\uC9C0 \uCC3D\uC744 \uB9CC\uB4E4 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
         }
 
+        // This process runs elevated; let Explorer (medium integrity) deliver tray messages.
+        if (taskbarCreatedMessage != 0)
+        {
+            ChangeWindowMessageFilterEx(handle, taskbarCreatedMessage, MsgFltAllow, IntPtr.Zero);
+        }
+
+        ChangeWindowMessageFilterEx(handle, WmTrayIcon, MsgFltAllow, IntPtr.Zero);
         return handle;
     }
 
@@ -1260,7 +1286,12 @@ public sealed class MainWindow : Window
     {
         try
         {
-            EnsureTrayIcon();
+            if (!trayIconAdded)
+            {
+                // Only retries while the icon is missing (e.g. Explorer not ready at logon).
+                EnsureTrayIcon();
+            }
+
             if (!isAutoLockCheckRunning)
             {
                 isAutoLockCheckRunning = true;
@@ -1322,6 +1353,7 @@ public sealed class MainWindow : Window
         var ownProcessId = Environment.ProcessId;
         var exeCache = new Dictionary<uint, string>();
         var pfnCache = new Dictionary<uint, string>();
+        var changed = false;
 
         EnumWindows((windowHandle, _) =>
         {
@@ -1341,10 +1373,21 @@ public sealed class MainWindow : Window
                 return true;
             }
 
-            ShowWindow(windowHandle, SwHide);
-            hiddenProtectedWindows.Add(windowHandle);
+            // Async: a hung protected app must not block this UI thread.
+            ShowWindowAsync(windowHandle, SwHide);
+            if (hiddenProtectedWindows.Add(windowHandle))
+            {
+                hiddenWindowOwners[windowHandle] = processId;
+                changed = true;
+            }
+
             return true;
         }, IntPtr.Zero);
+
+        if (changed)
+        {
+            SaveHiddenWindows();
+        }
     }
 
     private static bool IsProtectedWindow(
@@ -1429,18 +1472,90 @@ public sealed class MainWindow : Window
 
     private void RestoreHiddenProtectedWindows()
     {
+        if (hiddenProtectedWindows.Count == 0)
+        {
+            return;
+        }
+
         foreach (var windowHandle in hiddenProtectedWindows.ToArray())
         {
-            if (IsWindow(windowHandle))
+            if (IsOwnedBy(windowHandle, hiddenWindowOwners.GetValueOrDefault(windowHandle)))
             {
-                ShowWindow(windowHandle, SwShow);
-                ShowWindow(windowHandle, SwRestore);
-                BringWindowToTop(windowHandle);
+                // Async and without activation: never block on, or steal focus for, another app.
+                ShowWindowAsync(windowHandle, SwShowNa);
             }
         }
 
         hiddenProtectedWindows.Clear();
+        hiddenWindowOwners.Clear();
+        SaveHiddenWindows();
     }
+
+    private static bool IsOwnedBy(IntPtr windowHandle, uint processId)
+    {
+        if (processId == 0 || !IsWindow(windowHandle))
+        {
+            return false;
+        }
+
+        GetWindowThreadProcessId(windowHandle, out var currentProcessId);
+        return currentProcessId == processId;
+    }
+
+    private void LoadHiddenWindows()
+    {
+        // Windows hidden by a previous instance that crashed or was killed are adopted here, so the
+        // guard either keeps them hidden (still locked) or restores them on the next tick.
+        try
+        {
+            if (!File.Exists(hiddenWindowsStatePath))
+            {
+                return;
+            }
+
+            var entries = System.Text.Json.JsonSerializer.Deserialize<List<HiddenWindowEntry>>(
+                File.ReadAllText(hiddenWindowsStatePath)) ?? new List<HiddenWindowEntry>();
+            foreach (var entry in entries)
+            {
+                var windowHandle = new IntPtr(entry.Handle);
+                if (IsOwnedBy(windowHandle, entry.ProcessId))
+                {
+                    hiddenProtectedWindows.Add(windowHandle);
+                    hiddenWindowOwners[windowHandle] = entry.ProcessId;
+                }
+            }
+
+            SaveHiddenWindows();
+        }
+        catch (Exception ex)
+        {
+            App.WriteCrashLog(ex);
+        }
+    }
+
+    private void SaveHiddenWindows()
+    {
+        try
+        {
+            if (hiddenProtectedWindows.Count == 0)
+            {
+                File.Delete(hiddenWindowsStatePath);
+                return;
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(hiddenWindowsStatePath)!);
+            var entries = hiddenProtectedWindows
+                .Select(handle => new HiddenWindowEntry(handle.ToInt64(), hiddenWindowOwners.GetValueOrDefault(handle)))
+                .ToList();
+            File.WriteAllText(hiddenWindowsStatePath, System.Text.Json.JsonSerializer.Serialize(entries));
+        }
+        catch (Exception ex)
+        {
+            App.WriteCrashLog(ex);
+        }
+    }
+
+    private sealed record HiddenWindowEntry(long Handle, uint ProcessId);
 
     private static string GetProcessExecutableName(uint processId)
     {
@@ -1763,6 +1878,15 @@ public sealed class MainWindow : Window
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool DestroyWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint RegisterWindowMessage(string lpString);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool ChangeWindowMessageFilterEx(IntPtr hWnd, uint message, uint action, IntPtr changeFilterStruct);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr FindWindowEx(IntPtr hWndParent, IntPtr hWndChildAfter, string lpszClass, string? lpszWindow);

@@ -54,16 +54,13 @@ public sealed class ProtectedAppProcessService
             .Select(app => Path.GetFullPath(app.Path))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        var targetExeNames = apps
-            .Where(app => !string.IsNullOrWhiteSpace(app.ExecutableName))
-            .Select(app => app.ExecutableName)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        if (targetPaths.Count == 0 && targetExeNames.Count == 0)
+        if (targetPaths.Count == 0)
         {
             return new ProtectedAppProcessCloseResult(0, 0);
         }
 
+        // Match the full image path only: a same-named executable elsewhere is not a target, and
+        // packaged apps are never closed. Processes whose path cannot be read are skipped.
         var processes = new List<Process>();
 
         foreach (var process in Process.GetProcesses())
@@ -77,24 +74,7 @@ public sealed class ProtectedAppProcessService
                 }
 
                 var imagePath = GetProcessImageFileName(process.Id);
-                var isTarget = false;
-
-                if (!string.IsNullOrWhiteSpace(imagePath))
-                {
-                    var fullImagePath = Path.GetFullPath(imagePath);
-                    var exeName = Path.GetFileName(imagePath);
-                    isTarget = targetPaths.Contains(fullImagePath) || targetExeNames.Contains(exeName);
-                }
-                else
-                {
-                    // Fallback using process name if image path cannot be queried
-                    var fallbackExe = process.ProcessName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
-                        ? process.ProcessName
-                        : process.ProcessName + ".exe";
-                    isTarget = targetExeNames.Contains(fallbackExe);
-                }
-
-                if (!isTarget)
+                if (string.IsNullOrWhiteSpace(imagePath) || !targetPaths.Contains(Path.GetFullPath(imagePath)))
                 {
                     process.Dispose();
                     continue;
