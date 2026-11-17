@@ -2,10 +2,12 @@ namespace WindowsAppProtector.Models;
 
 public sealed class AppConfig
 {
+    public int StorageVersion { get; set; }
     public bool ProtectionEnabled { get; set; }
     public bool CloseToBackground { get; set; } = true;
     public bool CloseAppsOnLock { get; set; }
     public bool StartWithWindows { get; set; }
+    public bool EnableLaunchGate { get; set; }
     public int IdleLockMinutes { get; set; } = 10;
     public int UnlockMinutes { get; set; } = 10;
     public string? UnlockUntil { get; set; }

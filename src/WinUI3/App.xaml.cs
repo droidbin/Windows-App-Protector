@@ -5,6 +5,7 @@ namespace WindowsAppProtector;
 
 public partial class App : Application
 {
+    private static readonly object ProtectionLogLock = new();
     private Window? _window;
 
     public App()
@@ -20,7 +21,7 @@ public partial class App : Application
         {
             _ = new Microsoft.UI.Xaml.Controls.Grid
             {
-                Children = { new Microsoft.UI.Xaml.Controls.TextBlock { Text = "Windows App Protector" } }
+                Children = { new Microsoft.UI.Xaml.Controls.TextBlock { Text = ProductBrand.Name } }
             };
             Exit();
             return;
@@ -28,7 +29,7 @@ public partial class App : Application
 
         if (Environment.GetCommandLineArgs().Any(arg => string.Equals(arg, "--blocked", StringComparison.OrdinalIgnoreCase)))
         {
-            MessageBoxW(IntPtr.Zero, "이 앱은 Windows App Protector에 의해 차단되었습니다.", "Windows App Protector", 0x00000030);
+            MessageBoxW(IntPtr.Zero, "보호 정책에 따라 이 앱의 실행이 차단되었습니다.", ProductBrand.Name, 0x00000030);
             Exit();
             return;
         }
@@ -82,6 +83,29 @@ public partial class App : Application
         }
         catch
         {
+        }
+    }
+
+    internal static void WriteProtectionLog(string eventName)
+    {
+        lock (ProtectionLogLock)
+        {
+            try
+            {
+                var directory = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                    "Windows App Protector", "Logs");
+                Directory.CreateDirectory(directory);
+                var path = Path.Combine(directory, "protection.log");
+                var log = new FileInfo(path);
+                if (log.Exists && log.Length >= 256 * 1024)
+                {
+                    File.Move(path, path + ".previous", overwrite: true);
+                }
+                File.AppendAllText(path, $"[{DateTimeOffset.Now:O}] {eventName}{Environment.NewLine}");
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
         }
     }
 }

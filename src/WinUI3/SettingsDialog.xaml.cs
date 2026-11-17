@@ -43,6 +43,12 @@ public sealed class SettingsWindow : Window
         OnContent = "\uCF1C\uC9D0",
         OffContent = "\uAEBC\uC9D0",
     };
+    private readonly ToggleSwitch launchGateSwitch = new()
+    {
+        Header = "Win32 보호 앱 실행 시 PIN 묻기 (실험 기능)",
+        OnContent = "켜짐",
+        OffContent = "꺼짐",
+    };
     private readonly TextBox idleLockMinutesBox = new()
     {
         Header = "\uC720\uD734 \uC2DC \uC790\uB3D9 \uC7A0\uAE08(\uBD84)",
@@ -56,10 +62,13 @@ public sealed class SettingsWindow : Window
         Margin = new Thickness(0, 0, 0, 8),
     };
 
-    public SettingsWindow(MainViewModel viewModel)
+    private readonly Func<Task> changePinAsync;
+
+    public SettingsWindow(MainViewModel viewModel, Func<Task> changePinAsync)
     {
         ViewModel = viewModel;
-        Title = "\uC124\uC815";
+        this.changePinAsync = changePinAsync;
+        Title = $"{ProductBrand.Name} 설정";
         Content = BuildContent();
         saveButton.Click += SaveButton_Click;
         LoadPreferenceValues();
@@ -145,6 +154,7 @@ public sealed class SettingsWindow : Window
         panel.Children.Add(closeToBackgroundSwitch);
         panel.Children.Add(startWithWindowsSwitch);
         panel.Children.Add(closeAppsOnLockSwitch);
+        panel.Children.Add(launchGateSwitch);
         panel.Children.Add(new TextBlock
         {
             Text = "\uC885\uB8CC \uC694\uCCAD \uD6C4 5\uCD08 \uB300\uAE30\uD569\uB2C8\uB2E4. \uC800\uC7A5\uB418\uC9C0 \uC54A\uC740 \uC791\uC5C5\uC740 \uC190\uC2E4\uB420 \uC218 \uC788\uC73C\uBA70, \uC751\uB2F5\uD558\uC9C0 \uC54A\uB294 \uC571\uC740 \uAC15\uC81C \uC885\uB8CC\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.",
@@ -153,6 +163,13 @@ public sealed class SettingsWindow : Window
             TextWrapping = TextWrapping.Wrap,
         });
         panel.Children.Add(idleLockMinutesBox);
+        var changePinButton = new Button { Content = "PIN 변경" };
+        changePinButton.Click += async (_, _) =>
+        {
+            Close();
+            await changePinAsync();
+        };
+        panel.Children.Add(changePinButton);
         panel.Children.Add(new TextBlock
         {
             Text = "0\uC73C\uB85C \uC124\uC815\uD558\uBA74 \uC790\uB3D9 \uC7A0\uAE08\uC744 \uC0AC\uC6A9\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.",
@@ -191,6 +208,7 @@ public sealed class SettingsWindow : Window
 
     private void LoadPreferenceValues()
     {
+        launchGateSwitch.IsOn = ViewModel.EnableLaunchGate;
         closeToBackgroundSwitch.IsOn = ViewModel.CloseToBackground;
         startWithWindowsSwitch.IsOn = ViewModel.StartWithWindows;
         closeAppsOnLockSwitch.IsOn = ViewModel.CloseAppsOnLock;
@@ -313,7 +331,8 @@ public sealed class SettingsWindow : Window
                 ? parsedIdleLockMinutes
                 : ViewModel.IdleLockMinutes;
 
-            if (await ViewModel.SavePreferencesAsync(closeToBackgroundSwitch.IsOn, closeAppsOnLockSwitch.IsOn, startWithWindowsSwitch.IsOn, idleLockMinutes))
+            if (await ViewModel.SavePreferencesAsync(closeToBackgroundSwitch.IsOn, closeAppsOnLockSwitch.IsOn,
+                startWithWindowsSwitch.IsOn, idleLockMinutes, launchGateSwitch.IsOn))
             {
                 Close();
             }

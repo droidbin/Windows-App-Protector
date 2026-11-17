@@ -1,5 +1,5 @@
-Windows App Protector
-Version: 1.3.1-beta.1
+App PIN Guard
+Version: 2.0.0-alpha.4
 
 Install:
 1. Extract this zip file.
@@ -8,7 +8,7 @@ Install:
 4. Setup automatically removes previous WAP installations before installing. Existing PIN, settings, and protected-app lists are preserved.
 
 Uninstall:
-1. Open the Start menu and run "Windows App Protector Uninstall".
+1. Open the Start menu and run "App PIN Guard Uninstall".
 2. You can also double-click Uninstall.bat in this folder.
 
 Notes:

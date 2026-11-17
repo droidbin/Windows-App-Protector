@@ -22,6 +22,8 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
+      - name: Test settings migration
+        run: dotnet run --project tests/SettingsMigration/SettingsMigration.csproj -c Release
       - name: Build application and installer
         shell: pwsh
         run: ./build_distribution.ps1

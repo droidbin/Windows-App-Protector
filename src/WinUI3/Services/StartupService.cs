@@ -76,7 +76,7 @@ public static class StartupService
             <?xml version="1.0" encoding="UTF-16"?>
             <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
               <RegistrationInfo>
-                <Description>Windows App Protector background protection</Description>
+                <Description>{ProductBrand.Name} background protection</Description>
               </RegistrationInfo>
               <Triggers>
                 <LogonTrigger>

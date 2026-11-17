@@ -15,7 +15,7 @@ internal static class Setup
 {
     private static readonly byte[] Marker = System.Text.Encoding.ASCII.GetBytes("WAPZIP01");
     private const string AppName = "Windows App Protector";
-    private const string AppVersion = "1.3.1-beta.1";
+    private const string AppVersion = "2.0.0-alpha.4";
     private const string ExeName = "WindowsAppProtector.WinUI.exe";
     private const string ServiceExeName = "WindowsAppProtector.Service.exe";
     private const string ServiceName = "WindowsAppProtectorService";
@@ -51,7 +51,8 @@ internal static class Setup
             string payloadDir = Path.Combine(stagingDir, "payload");
             ExtractEmbeddedPayload(zipPath);
             ZipFile.ExtractToDirectory(zipPath, payloadDir);
-            foreach (string requiredFile in new[] { ExeName, "WindowsAppProtector.WinUI.dll", ServiceExeName })
+            foreach (string requiredFile in new[] { ExeName, "WindowsAppProtector.WinUI.dll", ServiceExeName,
+                "WindowsAppProtector.Gate.exe", "WindowsAppProtector.WindowAgent.exe" })
             {
                 if (!File.Exists(Path.Combine(payloadDir, requiredFile)))
                 {
@@ -85,8 +86,8 @@ internal static class Setup
 
             Directory.CreateDirectory(installDir);
             Directory.CreateDirectory(dataDir);
-            EnsureSharedConfigFile(dataDir);
             SecureDataDirectory(dataDir);
+            EnsureSharedConfigFile(dataDir);
 
             CopyPayloadDirectory(payloadDir, installDir);
 
@@ -95,11 +96,11 @@ internal static class Setup
             if (createShortcuts)
             {
                 CreateShortcut(
-                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory), AppName + ".lnk"),
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory), ProductBrand.Name + ".lnk"),
                     targetPath,
                     installDir);
                 CreateShortcut(
-                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu), "Programs", AppName + ".lnk"),
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu), "Programs", ProductBrand.Name + ".lnk"),
                     targetPath,
                     installDir);
             }
@@ -108,7 +109,7 @@ internal static class Setup
             if (createShortcuts)
             {
                 CreateShortcut(
-                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu), "Programs", AppName + " Uninstall.lnk"),
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu), "Programs", ProductBrand.Name + " Uninstall.lnk"),
                     Path.Combine(installDir, "Uninstall.bat"),
                     installDir);
             }
@@ -116,7 +117,7 @@ internal static class Setup
             TryWriteUninstallRegistry(installDir);
             InstallAndStartService(Path.Combine(installDir, ServiceExeName));
 
-            MessageBoxW(IntPtr.Zero, "\uC124\uCE58\uAC00 \uC644\uB8CC\uB418\uC5C8\uC2B5\uB2C8\uB2E4.", AppName, MessageBoxInformation);
+            MessageBoxW(IntPtr.Zero, "\uC124\uCE58\uAC00 \uC644\uB8CC\uB418\uC5C8\uC2B5\uB2C8\uB2E4.", ProductBrand.Name, MessageBoxInformation);
             Process.Start(new ProcessStartInfo
             {
                 FileName = targetPath,
@@ -128,7 +129,7 @@ internal static class Setup
         catch (Exception ex)
         {
             string detail = ex.InnerException != null ? "\n\n세부 정보:\n" + ex.InnerException.Message : "";
-            MessageBoxW(IntPtr.Zero, "설치 실패:\n" + ex.Message + detail, AppName, MessageBoxError);
+            MessageBoxW(IntPtr.Zero, "설치 실패:\n" + ex.Message + detail, ProductBrand.Name, MessageBoxError);
             return 1;
         }
         finally
@@ -305,7 +306,7 @@ internal static class Setup
             return;
         }
 
-        RunHidden("sc.exe", "create " + ServiceName + " binPath= \"" + servicePath + "\" start= auto DisplayName= \"" + AppName + " Service\"");
+        RunHidden("sc.exe", "create " + ServiceName + " binPath= \"" + servicePath + "\" start= auto DisplayName= \"" + ProductBrand.Name + " Service\"");
         RunHidden("sc.exe", "failure " + ServiceName + " reset= 60 actions= restart/5000/restart/5000/restart/5000");
         RunHidden("sc.exe", "start " + ServiceName);
     }
@@ -473,7 +474,16 @@ internal static class Setup
 
                 key.DeleteValue("Debugger", false);
                 key.DeleteValue(MarkerName, false);
-                key.DeleteValue("UseFilter", false);
+                foreach (string child in key.GetSubKeyNames())
+                {
+                    if (!child.StartsWith("WAP.Launch.", StringComparison.Ordinal)) continue;
+                    bool owned;
+                    using (var filter = key.OpenSubKey(child))
+                        owned = filter != null && Convert.ToString(filter.GetValue(MarkerName)) == "1";
+                    if (owned) key.DeleteSubKey(child, false);
+                }
+                if (key.SubKeyCount == 0) key.DeleteValue("UseFilter", false);
+                if (key.ValueCount != 0 || key.SubKeyCount != 0) return;
             }
 
             try
@@ -526,7 +536,7 @@ internal static class Setup
         int result = MessageBoxW(
             IntPtr.Zero,
             "\uBC14\uD0D5\uD654\uBA74 \uBC0F \uC2DC\uC791 \uBA54\uB274 \uBC14\uB85C\uAC00\uAE30\uB97C \uC0DD\uC131\uD558\uC2DC\uACA0\uC2B5\uB2C8\uAE4C?",
-            AppName,
+            ProductBrand.Name,
             MessageBoxQuestionYesNo);
 
         return result == DialogResultYes;
@@ -574,16 +584,19 @@ internal static class Setup
             "timeout /t 1 /nobreak >nul 2>&1\r\n" +
             "schtasks /Delete /TN \"Windows App Protector\" /F >nul 2>&1\r\n" +
             "reg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\" /v \"Windows App Protector\" /f >nul 2>&1\r\n" +
-            "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$root='HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options'; Get-ChildItem $root -ErrorAction SilentlyContinue | ForEach-Object { $p=Get-ItemProperty $_.PsPath -ErrorAction SilentlyContinue; if ($p.WindowsAppProtectorManaged -eq '1') { Remove-Item $_.PsPath -Force -ErrorAction SilentlyContinue } }\"\r\n" +
+            "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$root='HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options'; Get-ChildItem -LiteralPath $root | ForEach-Object { $key=$_; if ($key.GetValue('WindowsAppProtectorManaged') -eq '1') { Get-ChildItem -LiteralPath $key.PSPath | Where-Object { $_.PSChildName -like 'WAP.Launch.*' -and $_.GetValue('WindowsAppProtectorManaged') -eq '1' -and $_.SubKeyCount -eq 0 } | Remove-Item -Force; foreach ($name in 'Debugger','WindowsAppProtectorManaged') { Remove-ItemProperty -LiteralPath $key.PSPath -Name $name -ErrorAction SilentlyContinue }; if ($key.SubKeyCount -eq 0) { Remove-ItemProperty -LiteralPath $key.PSPath -Name UseFilter -ErrorAction SilentlyContinue; if ($key.ValueCount -eq 0) { Remove-Item -LiteralPath $key.PSPath -Force } } } }\"\r\n" +
             "rmdir /s /q \"%ProgramData%\\Windows App Protector\" >nul 2>&1\r\n" +
             "rmdir /s /q \"%AppData%\\WindowsAppProtector.WinUI\" >nul 2>&1\r\n" +
             "rmdir /s /q \"%AppData%\\WindowsAppProtector\" >nul 2>&1\r\n" +
             "del \"%PUBLIC%\\Desktop\\Windows App Protector.lnk\" >nul 2>&1\r\n" +
             "del \"%ProgramData%\\Microsoft\\Windows\\Start Menu\\Programs\\Windows App Protector.lnk\" >nul 2>&1\r\n" +
             "del \"%ProgramData%\\Microsoft\\Windows\\Start Menu\\Programs\\Windows App Protector Uninstall.lnk\" >nul 2>&1\r\n" +
+            "del \"%PUBLIC%\\Desktop\\" + ProductBrand.Name + ".lnk\" >nul 2>&1\r\n" +
+            "del \"%ProgramData%\\Microsoft\\Windows\\Start Menu\\Programs\\" + ProductBrand.Name + ".lnk\" >nul 2>&1\r\n" +
+            "del \"%ProgramData%\\Microsoft\\Windows\\Start Menu\\Programs\\" + ProductBrand.Name + " Uninstall.lnk\" >nul 2>&1\r\n" +
             "reg delete \"HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\WindowsAppProtector\" /f >nul 2>&1\r\n" +
             "rmdir /s /q \"" + installDir + "\" >nul 2>&1\r\n" +
-            "echo Windows App Protector has been removed.\r\n" +
+            "echo " + ProductBrand.Name + " has been removed.\r\n" +
             "pause\r\n",
             System.Text.Encoding.ASCII);
     }
@@ -600,9 +613,9 @@ internal static class Setup
                     return;
                 }
 
-                key.SetValue("DisplayName", AppName);
+                key.SetValue("DisplayName", ProductBrand.Name);
                 key.SetValue("DisplayVersion", AppVersion);
-                key.SetValue("Publisher", "Windows App Protector");
+                key.SetValue("Publisher", ProductBrand.Name);
                 key.SetValue("InstallLocation", installDir);
                 key.SetValue("DisplayIcon", Path.Combine(installDir, ExeName));
                 key.SetValue("UninstallString", "\"" + Path.Combine(installDir, "Uninstall.bat") + "\"");
@@ -803,14 +816,13 @@ internal static class Setup
         {
             if (runKey != null) runKey.DeleteValue(AppName, false);
         }
-        foreach (string shortcut in new[]
+        string desktop = Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory);
+        string startMenu = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu), "Programs");
+        foreach (string name in new[] { AppName, ProductBrand.Name })
         {
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory), AppName + ".lnk"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu), "Programs", AppName + ".lnk"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu), "Programs", AppName + " Uninstall.lnk")
-        })
-        {
-            File.Delete(shortcut);
+            File.Delete(Path.Combine(desktop, name + ".lnk"));
+            File.Delete(Path.Combine(startMenu, name + ".lnk"));
+            File.Delete(Path.Combine(startMenu, name + " Uninstall.lnk"));
         }
         foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
         {

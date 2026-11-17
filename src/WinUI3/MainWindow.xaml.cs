@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml.Data;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Markup;
 using System.Diagnostics;
+using System.Globalization;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -27,6 +28,16 @@ public sealed class MainWindow : Window
     private const int ModWin = 0x0008;
     private const int ModNoRepeat = 0x4000;
     private const int WmClose = 0x0010;
+    private const uint WmPowerBroadcast = 0x0218;
+    private const uint WmWtsSessionChange = 0x02B1;
+    private const int WtsConsoleDisconnect = 0x2;
+    private const int WtsRemoteDisconnect = 0x4;
+    private const int WtsSessionLock = 0x7;
+    private const int PowerSuspend = 0x4;
+    private const int PowerResumeAutomatic = 0x12;
+    private const uint EventSystemForeground = 0x0003;
+    private const uint EventObjectShow = 0x8002;
+    private const uint WinEventSkipOwnProcess = 0x0002;
     private const int WmTrayIcon = 0x0400 + 1;
     private const int WmLButtonDblClk = 0x0203;
     private const int WmRButtonUp = 0x0205;
@@ -73,12 +84,24 @@ public sealed class MainWindow : Window
     private readonly DispatcherTimer windowGuardTimer = new() { Interval = TimeSpan.FromMilliseconds(700) };
     private readonly WndProcDelegate messageWndProcDelegate;
     private readonly IntPtr messageWindowHandle;
+    private readonly WinEventProc winEventCallback;
+    private readonly IntPtr foregroundEventHook;
+    private readonly IntPtr showEventHook;
+    private readonly HashSet<IntPtr> pendingWindowChecks = new();
+    private IReadOnlySet<string>? previousLockedExecutables;
+    private IReadOnlySet<string>? previousLockedPackages;
+    private long nextFullWindowScan;
     private bool isClosing;
     private bool isExitRequested;
     private bool isAuthenticating;
     private bool isCheckingForUpdates;
     private bool isAutoLockCheckRunning;
     private bool trayIconAdded;
+    private bool sessionNotificationsRegistered;
+    private int authenticationGeneration;
+    private bool initialized;
+    private bool sessionRelockPending;
+    private bool sessionRelockRunning;
     private bool ownsTrayIconHandle;
     private IntPtr trayIconHandle;
     private IntPtr hwnd;
@@ -89,6 +112,7 @@ public sealed class MainWindow : Window
     private readonly Grid shellRoot = new();
     private FrameworkElement? mainContent;
     private FrameworkElement? lockedPlaceholder;
+    private TextBlock? lockedStatusText;
     private Task<bool>? pendingAuthentication;
     private bool isSessionUnlocked;
     private bool hasCheckedUpdatesAfterUnlock;
@@ -104,12 +128,17 @@ public sealed class MainWindow : Window
         this.startInBackground = startInBackground;
         messageWndProcDelegate = MessageWndProc;
         messageWindowHandle = CreateMessageWindow();
-        Title = "Windows App Protector";
+        Title = $"{ProductBrand.Name} v{GetCurrentVersionText()}";
         Activated += MainWindow_Activated;
         Closed += MainWindow_Closed;
         AddTrayIcon();
         Content = BuildShell();
         LoadHiddenWindows();
+        winEventCallback = QueueWindowCheck;
+        foregroundEventHook = SetWinEventHook(EventSystemForeground, EventSystemForeground,
+            IntPtr.Zero, winEventCallback, 0, 0, WinEventSkipOwnProcess);
+        showEventHook = SetWinEventHook(EventObjectShow, EventObjectShow,
+            IntPtr.Zero, winEventCallback, 0, 0, WinEventSkipOwnProcess);
         windowGuardTimer.Tick += WindowGuardTimer_Tick;
         windowGuardTimer.Start();
         _ = InitializeAsync();
@@ -139,9 +168,23 @@ public sealed class MainWindow : Window
         {
             App.WriteCrashLog(ex);
             ViewModel.StatusText = $"설정을 불러오지 못했습니다: {ex.Message}";
+            if (lockedStatusText is not null)
+            {
+                lockedStatusText.Text = "보호 설정을 불러오지 못했습니다. 설치 또는 설정을 복구한 뒤 다시 시작하세요.";
+            }
+            if (startInBackground)
+            {
+                HideToTray();
+            }
+            return;
         }
 
         RegisterConfiguredHotkeys();
+        initialized = true;
+        if (sessionRelockPending)
+        {
+            await RelockForSystemEventAsync();
+        }
 
         if (startInBackground)
         {
@@ -169,13 +212,14 @@ public sealed class MainWindow : Window
             Spacing = 10,
         };
         placeholder.Children.Add(new FontIcon { Glyph = "", FontSize = 36, Foreground = Brush(0x1F, 0x6B, 0x50) });
-        placeholder.Children.Add(new TextBlock
+        lockedStatusText = new TextBlock
         {
-            Text = "Windows App Protector가 잠겨 있습니다.",
+            Text = $"{ProductBrand.Name} 잠금 상태입니다.",
             FontSize = 15,
             Foreground = Brush(0x1C, 0x2B, 0x25),
             HorizontalAlignment = HorizontalAlignment.Center,
-        });
+        };
+        placeholder.Children.Add(lockedStatusText);
         lockedPlaceholder = placeholder;
 
         shellRoot.Background = Brush(0xF4, 0xF7, 0xF5);
@@ -244,14 +288,14 @@ public sealed class MainWindow : Window
         var heading = new StackPanel { Spacing = 3, VerticalAlignment = VerticalAlignment.Center };
         heading.Children.Add(new TextBlock
         {
-            Text = "Windows App Protector",
+            Text = ProductBrand.Name,
             FontSize = 24,
             FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
             Foreground = Brush(0x1C, 0x2B, 0x25),
         });
         var subtitle = new TextBlock
         {
-            Text = "앱 보호 관리",
+            Text = $"앱 보호 관리 · v{GetCurrentVersionText()}",
             FontSize = 13,
             Foreground = Brush(0x65, 0x75, 0x6D),
         };
@@ -302,8 +346,16 @@ public sealed class MainWindow : Window
             Mode = BindingMode.TwoWay,
             UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged,
         });
-        Grid.SetRow(searchBox, 1);
-        toolbar.Children.Add(searchBox);
+        var searchRow = new Grid { ColumnSpacing = 8 };
+        searchRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        searchRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        searchRow.Children.Add(searchBox);
+        var launchPolicy = CreateActionButton("실행 정책", "\uE713", LaunchPolicy_Click);
+        launchPolicy.Margin = new Thickness(0, 8, 0, 0);
+        Grid.SetColumn(launchPolicy, 1);
+        searchRow.Children.Add(launchPolicy);
+        Grid.SetRow(searchRow, 1);
+        toolbar.Children.Add(searchRow);
 
         Grid.SetRow(toolbar, 1);
         root.Children.Add(toolbar);
@@ -409,7 +461,7 @@ public sealed class MainWindow : Window
                 return;
             }
 
-            settingsWindow = new SettingsWindow(ViewModel);
+            settingsWindow = new SettingsWindow(ViewModel, () => RunLoggedAsync(ChangePinAsync));
             settingsWindow.Closed += (_, _) =>
             {
                 settingsWindow = null;
@@ -565,6 +617,79 @@ public sealed class MainWindow : Window
         await ViewModel.SetListedAppsEnabledAsync(false);
     }
 
+    private async void LaunchPolicy_Click(object sender, RoutedEventArgs e)
+    {
+        var selected = ViewModel.SelectedApp;
+        var policy = ViewModel.GetLaunchPolicy(selected);
+        if (!isSessionUnlocked || selected is null || policy is null)
+        {
+            ViewModel.StatusText = "실행 정책을 설정할 Win32 보호 앱 하나를 선택하세요.";
+            return;
+        }
+
+        await RunLoggedAsync(async () =>
+        {
+            var generation = authenticationGeneration;
+            var defaults = new CheckBox { Content = "기본 PIN 사용", IsChecked = !policy.Value.CustomPin };
+            var pin = new PasswordBox { Header = "새 앱 전용 PIN", MaxLength = 32 };
+            var confirm = new PasswordBox { Header = "앱 전용 PIN 확인", MaxLength = 32 };
+            var minutes = new TextBox { Header = "PIN 재입력 없이 다시 실행할 수 있는 시간(분)", Text = policy.Value.Minutes.ToString(), MaxLength = 4 };
+            var start = new TextBox { Header = "잠금 시작(HH:mm)", Text = FormatMinute(policy.Value.Start), MaxLength = 5 };
+            var end = new TextBox { Header = "잠금 종료(HH:mm)", Text = FormatMinute(policy.Value.End), MaxLength = 5 };
+            var relock = new CheckBox { Content = "실행한 앱이 모두 종료되면 바로 재잠금", IsChecked = policy.Value.RelockOnExit };
+            var note = new TextBlock
+            {
+                Text = "0분이면 실행할 때마다 PIN을 묻습니다. 시간을 모두 비우면 종일 잠급니다. 기존 전용 PIN을 유지하려면 PIN 칸을 비워 두세요.",
+                TextWrapping = TextWrapping.Wrap,
+            };
+            var fields = new StackPanel { Spacing = 8 };
+            foreach (var field in new UIElement[] { note, defaults, pin, confirm, minutes, relock, start, end })
+                fields.Children.Add(field);
+
+            var dialog = new ContentDialog
+            {
+                Title = $"{selected.Name} 실행 정책",
+                Content = new ScrollViewer { Content = fields, MaxHeight = 470 },
+                XamlRoot = Content.XamlRoot,
+                PrimaryButtonText = "저장",
+                CloseButtonText = "취소",
+            };
+            if (await ShowContentDialogAsync(dialog) != ContentDialogResult.Primary ||
+                !isSessionUnlocked || generation != authenticationGeneration)
+                return;
+
+            bool useDefault = defaults.IsChecked == true;
+            bool hasNewPin = pin.Password.Length > 0;
+            if (!int.TryParse(minutes.Text, out var duration) || duration is < 0 or > 1440 ||
+                (!useDefault && ((!policy.Value.CustomPin && !hasNewPin) ||
+                    (hasNewPin && (pin.Password.Length < 4 || pin.Password != confirm.Password)))) ||
+                !TryParseLockHours(start.Text, end.Text, out var lockStart, out var lockEnd))
+            {
+                ViewModel.StatusText = "실행 정책이 저장되지 않았습니다. PIN, 허용 시간(0~1440분), 잠금 시간 입력을 확인하세요.";
+                return;
+            }
+
+            await ViewModel.SaveLaunchPolicyAsync(selected, useDefault, pin.Password, duration, lockStart, lockEnd, relock.IsChecked == true);
+        });
+    }
+
+    private static string FormatMinute(int? minute) => minute is >= 0 and < 1440
+        ? new TimeOnly(minute.Value / 60, minute.Value % 60).ToString("HH:mm", CultureInfo.InvariantCulture)
+        : string.Empty;
+
+    private static bool TryParseLockHours(string start, string end, out int? startMinute, out int? endMinute)
+    {
+        startMinute = endMinute = null;
+        if (string.IsNullOrWhiteSpace(start) && string.IsNullOrWhiteSpace(end))
+            return true;
+        if (!TimeOnly.TryParseExact(start, "HH:mm", CultureInfo.InvariantCulture, DateTimeStyles.None, out var from) ||
+            !TimeOnly.TryParseExact(end, "HH:mm", CultureInfo.InvariantCulture, DateTimeStyles.None, out var to) ||
+            from == to)
+            return false;
+        startMinute = from.Hour * 60 + from.Minute;
+        endMinute = to.Hour * 60 + to.Minute;
+        return true;
+    }
     private void AppList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         ViewModel.SelectedApp = appList.SelectedItem as ProtectedAppViewModel;
@@ -612,7 +737,22 @@ public sealed class MainWindow : Window
 
     private IntPtr MessageWndProc(IntPtr windowHandle, uint message, IntPtr wParam, IntPtr lParam)
     {
-        if (message == WmTrayIcon && (lParam.ToInt32() == WmLButtonDblClk || lParam.ToInt32() == WmRButtonUp))
+        if ((message == WmWtsSessionChange && wParam.ToInt64() is WtsConsoleDisconnect or WtsRemoteDisconnect or WtsSessionLock) ||
+            (message == WmPowerBroadcast && wParam.ToInt64() is PowerSuspend or PowerResumeAutomatic))
+        {
+            authenticationGeneration++;
+            sessionRelockPending = true;
+            _ = RunLoggedAsync(RelockForSystemEventAsync);
+            return message == WmPowerBroadcast ? new IntPtr(1) : IntPtr.Zero;
+        }
+
+        if (message == WmTrayIcon && lParam.ToInt64() == WmRButtonUp)
+        {
+            ShowTrayMenu(windowHandle);
+            return IntPtr.Zero;
+        }
+
+        if (message == WmTrayIcon && lParam.ToInt64() == WmLButtonDblClk)
         {
             _ = RunLoggedAsync(ShowMainWindowAsync);
             return IntPtr.Zero;
@@ -639,6 +779,79 @@ public sealed class MainWindow : Window
         }
 
         return DefWindowProc(windowHandle, message, wParam, lParam);
+    }
+
+    private async Task RelockForSystemEventAsync()
+    {
+        if (!initialized || isClosing || sessionRelockRunning)
+        {
+            return;
+        }
+
+        sessionRelockRunning = true;
+        try
+        {
+            do
+            {
+                sessionRelockPending = false;
+                HideToTray();
+                App.WriteProtectionLog("system-relock-requested");
+                await ViewModel.SetListedAppsEnabledAsync(true, closeRunningApps: false);
+            } while (sessionRelockPending && !isClosing);
+        }
+        finally
+        {
+            sessionRelockRunning = false;
+        }
+    }
+
+    private void ShowTrayMenu(IntPtr owner)
+    {
+        if (!initialized || isClosing || !GetCursorPos(out var point))
+        {
+            return;
+        }
+
+        var menu = CreatePopupMenu();
+        if (menu == IntPtr.Zero)
+        {
+            return;
+        }
+
+        uint command;
+        try
+        {
+            AppendMenu(menu, 0, 1, "열기");
+            AppendMenu(menu, 0, 2, "전체 잠금");
+            AppendMenu(menu, 0, 3, "종료");
+            SetForegroundWindow(owner);
+            command = TrackPopupMenu(menu, 0x0102, point.X, point.Y, 0, owner, IntPtr.Zero);
+            PostMessage(owner, 0, IntPtr.Zero, IntPtr.Zero);
+        }
+        finally
+        {
+            DestroyMenu(menu);
+        }
+
+        if (command == 1)
+        {
+            _ = RunLoggedAsync(ShowMainWindowAsync);
+        }
+        else if (command == 2)
+        {
+            _ = RunLoggedAsync(() => ExecuteHotkeyActionAsync("lock-all"));
+        }
+        else if (command == 3)
+        {
+            _ = RunLoggedAsync(async () =>
+            {
+                await ShowMainWindowAsync();
+                if (isSessionUnlocked)
+                {
+                    ExitApplication();
+                }
+            });
+        }
     }
 
     private static async Task RunLoggedAsync(Func<Task> action)
@@ -689,6 +902,14 @@ public sealed class MainWindow : Window
 
         isClosing = true;
         windowGuardTimer.Stop();
+        if (foregroundEventHook != IntPtr.Zero)
+        {
+            UnhookWinEvent(foregroundEventHook);
+        }
+        if (showEventHook != IntPtr.Zero)
+        {
+            UnhookWinEvent(showEventHook);
+        }
         RestoreHiddenProtectedWindows();
         UnregisterConfiguredHotkeys();
         RemoveTrayIcon();
@@ -698,6 +919,10 @@ public sealed class MainWindow : Window
         }
         if (messageWindowHandle != IntPtr.Zero)
         {
+            if (sessionNotificationsRegistered)
+            {
+                WTSUnRegisterSessionNotification(messageWindowHandle);
+            }
             DestroyWindow(messageWindowHandle);
         }
 
@@ -706,7 +931,7 @@ public sealed class MainWindow : Window
 
     private void AppWindow_Closing(AppWindow sender, AppWindowClosingEventArgs args)
     {
-        if (isExitRequested || !ViewModel.CloseToBackground)
+        if (isExitRequested || (!ViewModel.CloseToBackground && isSessionUnlocked))
         {
             return;
         }
@@ -808,7 +1033,7 @@ public sealed class MainWindow : Window
             uFlags = NifMessage | NifIcon | NifTip,
             uCallbackMessage = WmTrayIcon,
             hIcon = GetTrayIconHandle(),
-            szTip = "Windows App Protector",
+            szTip = $"{ProductBrand.Name} v{GetCurrentVersionText()}",
         };
     }
 
@@ -963,9 +1188,11 @@ public sealed class MainWindow : Window
     private static string GetCurrentVersionText()
     {
         var assembly = Assembly.GetExecutingAssembly();
-        return assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+        var version = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
             ?? assembly.GetName().Version?.ToString(3)
             ?? "0.0.0";
+        var metadataStart = version.IndexOf('+');
+        return metadataStart < 0 ? version : version[..metadataStart];
     }
 
     private static string QuoteArgument(string value)
@@ -1006,10 +1233,15 @@ public sealed class MainWindow : Window
 
     private async Task ShowMainWindowAsync()
     {
+        if (sessionRelockRunning || (isAuthenticating && pendingAuthentication is null))
+        {
+            return;
+        }
+
         EnsureMainWindowInterop();
         ForceForegroundWindow(hwnd);
 
-        if (isSessionUnlocked)
+        if (!initialized || isSessionUnlocked)
         {
             return;
         }
@@ -1034,6 +1266,11 @@ public sealed class MainWindow : Window
 
     private Task<bool> EnsureWindowAccessAsync(bool isInitialLaunch)
     {
+        if (!initialized)
+        {
+            return Task.FromResult(false);
+        }
+
         // Concurrent callers (tray click, hotkey, startup) share one PIN prompt instead of
         // the late caller receiving a spurious failure.
         var authentication = pendingAuthentication ??= AuthenticateAsync(isInitialLaunch);
@@ -1048,6 +1285,7 @@ public sealed class MainWindow : Window
 
     private async Task<bool> AuthenticateAsync(bool isInitialLaunch)
     {
+        var generation = authenticationGeneration;
         isAuthenticating = true;
         try
         {
@@ -1057,6 +1295,7 @@ public sealed class MainWindow : Window
             var authenticated = ViewModel.HasAppPin
                 ? await ShowVerifyPinDialogAsync(isInitialLaunch)
                 : await ShowCreatePinDialogAsync();
+            authenticated &= generation == authenticationGeneration;
             SetSessionUnlocked(authenticated);
             if (authenticated && !hasCheckedUpdatesAfterUnlock)
             {
@@ -1102,11 +1341,35 @@ public sealed class MainWindow : Window
         }
     }
 
-    private async Task<bool> ShowCreatePinDialogAsync()
+    private async Task ChangePinAsync()
     {
+        if (!isSessionUnlocked || !ViewModel.HasAppPin || isAuthenticating)
+        {
+            return;
+        }
+
+        var generation = authenticationGeneration;
+        isAuthenticating = true;
+        try
+        {
+            if (await ShowVerifyPinDialogAsync(isInitialLaunch: false) &&
+                isSessionUnlocked && generation == authenticationGeneration)
+            {
+                await ShowCreatePinDialogAsync(isChangingPin: true);
+            }
+        }
+        finally
+        {
+            isAuthenticating = false;
+        }
+    }
+
+    private async Task<bool> ShowCreatePinDialogAsync(bool isChangingPin = false)
+    {
+        var generation = authenticationGeneration;
         var errorText = string.Empty;
 
-        while (true)
+        while (generation == authenticationGeneration && (!isChangingPin || isSessionUnlocked))
         {
             var pinBox = new PasswordBox
             {
@@ -1143,7 +1406,7 @@ public sealed class MainWindow : Window
 
             var dialog = new ContentDialog
             {
-                Title = "PIN 설정",
+                Title = isChangingPin ? "PIN 변경" : "PIN 설정",
                 Content = panel,
                 PrimaryButtonText = "설정",
                 CloseButtonText = "닫기",
@@ -1162,7 +1425,8 @@ public sealed class MainWindow : Window
                 return false;
             }
 
-            if (result != ContentDialogResult.Primary)
+            if (result != ContentDialogResult.Primary || generation != authenticationGeneration ||
+                (isChangingPin && !isSessionUnlocked))
             {
                 return false;
             }
@@ -1184,16 +1448,19 @@ public sealed class MainWindow : Window
             }
 
             await ViewModel.SetAppPinAsync(pinBox.Password);
-            ViewModel.StatusText = "PIN이 설정되었습니다.";
+            ViewModel.StatusText = isChangingPin ? "PIN이 변경되었습니다." : "PIN이 설정되었습니다.";
             return true;
         }
+
+        return false;
     }
 
     private async Task<bool> ShowVerifyPinDialogAsync(bool isInitialLaunch)
     {
+        var generation = authenticationGeneration;
         var errorText = string.Empty;
 
-        while (true)
+        while (generation == authenticationGeneration)
         {
             var pinBox = new PasswordBox
             {
@@ -1244,7 +1511,7 @@ public sealed class MainWindow : Window
                 return false;
             }
 
-            if (result != ContentDialogResult.Primary)
+            if (result != ContentDialogResult.Primary || generation != authenticationGeneration)
             {
                 return false;
             }
@@ -1265,6 +1532,7 @@ public sealed class MainWindow : Window
             }
 
             failedPinAttempts++;
+            App.WriteProtectionLog("pin-verification-failed");
             if (failedPinAttempts >= MaxPinAttemptsBeforeLockout)
             {
                 // 30s, 60s, 120s ... capped at 15 minutes for each further failure.
@@ -1280,16 +1548,28 @@ public sealed class MainWindow : Window
 
             await Task.Delay(100);
         }
+
+        return false;
     }
 
     private async void WindowGuardTimer_Tick(object? sender, object e)
     {
         try
         {
+            if (!sessionNotificationsRegistered)
+            {
+                sessionNotificationsRegistered = WTSRegisterSessionNotification(messageWindowHandle, 0);
+            }
+
             if (!trayIconAdded)
             {
                 // Only retries while the icon is missing (e.g. Explorer not ready at logon).
                 EnsureTrayIcon();
+            }
+
+            if (!initialized || isClosing)
+            {
+                return;
             }
 
             if (!isAutoLockCheckRunning)
@@ -1315,13 +1595,28 @@ public sealed class MainWindow : Window
 
             var lockedExecutables = ViewModel.GetLockedExecutableNames();
             var lockedPackageFamilies = ViewModel.GetLockedPackageFamilyNames();
+            RestoreHiddenProtectedWindows(lockedExecutables, lockedPackageFamilies);
             if (lockedExecutables.Count == 0 && lockedPackageFamilies.Count == 0)
             {
-                RestoreHiddenProtectedWindows();
                 return;
             }
 
-            HideLockedAppWindows(lockedExecutables, lockedPackageFamilies);
+            var now = Environment.TickCount64;
+            var fullScan = foregroundEventHook == IntPtr.Zero || showEventHook == IntPtr.Zero ||
+                now >= nextFullWindowScan || previousLockedExecutables?.SetEquals(lockedExecutables) != true ||
+                previousLockedPackages?.SetEquals(lockedPackageFamilies) != true;
+            var candidates = fullScan ? null : pendingWindowChecks.ToArray();
+            pendingWindowChecks.Clear();
+            if (fullScan)
+            {
+                nextFullWindowScan = now + 5000;
+                previousLockedExecutables = lockedExecutables;
+                previousLockedPackages = lockedPackageFamilies;
+            }
+            if (fullScan || candidates is { Length: > 0 })
+            {
+                HideLockedAppWindows(lockedExecutables, lockedPackageFamilies, candidates);
+            }
         }
         catch (Exception ex)
         {
@@ -1348,14 +1643,15 @@ public sealed class MainWindow : Window
 
     private void HideLockedAppWindows(
         IReadOnlySet<string> lockedExecutables,
-        IReadOnlySet<string> lockedPackageFamilies)
+        IReadOnlySet<string> lockedPackageFamilies,
+        IntPtr[]? candidates)
     {
         var ownProcessId = Environment.ProcessId;
         var exeCache = new Dictionary<uint, string>();
         var pfnCache = new Dictionary<uint, string>();
         var changed = false;
 
-        EnumWindows((windowHandle, _) =>
+        bool CheckWindow(IntPtr windowHandle, IntPtr _)
         {
             if (windowHandle == hwnd || !IsWindowVisible(windowHandle))
             {
@@ -1374,19 +1670,52 @@ public sealed class MainWindow : Window
             }
 
             // Async: a hung protected app must not block this UI thread.
-            ShowWindowAsync(windowHandle, SwHide);
-            if (hiddenProtectedWindows.Add(windowHandle))
+            if (ShowWindowAsync(windowHandle, SwHide) &&
+                (!hiddenWindowOwners.TryGetValue(windowHandle, out var owner) || owner != processId))
             {
+                hiddenProtectedWindows.Add(windowHandle);
                 hiddenWindowOwners[windowHandle] = processId;
                 changed = true;
             }
 
             return true;
-        }, IntPtr.Zero);
+        }
+
+        if (candidates is null)
+        {
+            EnumWindows(CheckWindow, IntPtr.Zero);
+        }
+        else
+        {
+            foreach (var candidate in candidates)
+            {
+                CheckWindow(candidate, IntPtr.Zero);
+            }
+        }
 
         if (changed)
         {
             SaveHiddenWindows();
+        }
+    }
+
+    private void QueueWindowCheck(IntPtr hook, uint eventType, IntPtr windowHandle,
+        int objectId, int childId, uint threadId, uint eventTime)
+    {
+        if (!initialized || isClosing || windowHandle == IntPtr.Zero || objectId != 0 || childId != 0)
+        {
+            return;
+        }
+
+        var root = GetAncestor(windowHandle, 2);
+        if (root != IntPtr.Zero)
+        {
+            if (pendingWindowChecks.Count >= 512)
+            {
+                nextFullWindowScan = 0;
+                return;
+            }
+            pendingWindowChecks.Add(root);
         }
     }
 
@@ -1470,25 +1799,47 @@ public sealed class MainWindow : Window
         return false;
     }
 
-    private void RestoreHiddenProtectedWindows()
+    private void RestoreHiddenProtectedWindows(
+        IReadOnlySet<string>? lockedExecutables = null,
+        IReadOnlySet<string>? lockedPackageFamilies = null)
     {
         if (hiddenProtectedWindows.Count == 0)
         {
             return;
         }
 
+        var executableCache = new Dictionary<uint, string>();
+        var packageCache = new Dictionary<uint, string>();
+        var changed = false;
         foreach (var windowHandle in hiddenProtectedWindows.ToArray())
         {
-            if (IsOwnedBy(windowHandle, hiddenWindowOwners.GetValueOrDefault(windowHandle)))
+            var owner = hiddenWindowOwners.GetValueOrDefault(windowHandle);
+            if (IsOwnedBy(windowHandle, owner))
             {
-                // Async and without activation: never block on, or steal focus for, another app.
-                ShowWindowAsync(windowHandle, SwShowNa);
+                if (lockedExecutables is not null && lockedPackageFamilies is not null &&
+                    IsProtectedWindow(windowHandle, owner, lockedExecutables, lockedPackageFamilies,
+                        executableCache, packageCache, out _))
+                {
+                    continue;
+                }
+
+                if (!IsWindowVisible(windowHandle))
+                {
+                    ShowWindowAsync(windowHandle, SwShowNa);
+                    // Keep the record until the async request takes effect.
+                    continue;
+                }
             }
+
+            hiddenProtectedWindows.Remove(windowHandle);
+            hiddenWindowOwners.Remove(windowHandle);
+            changed = true;
         }
 
-        hiddenProtectedWindows.Clear();
-        hiddenWindowOwners.Clear();
-        SaveHiddenWindows();
+        if (changed)
+        {
+            SaveHiddenWindows();
+        }
     }
 
     private static bool IsOwnedBy(IntPtr windowHandle, uint processId)
@@ -1535,6 +1886,7 @@ public sealed class MainWindow : Window
 
     private void SaveHiddenWindows()
     {
+        string? tempPath = null;
         try
         {
             if (hiddenProtectedWindows.Count == 0)
@@ -1547,11 +1899,22 @@ public sealed class MainWindow : Window
             var entries = hiddenProtectedWindows
                 .Select(handle => new HiddenWindowEntry(handle.ToInt64(), hiddenWindowOwners.GetValueOrDefault(handle)))
                 .ToList();
-            File.WriteAllText(hiddenWindowsStatePath, System.Text.Json.JsonSerializer.Serialize(entries));
+            tempPath = $"{hiddenWindowsStatePath}.{Guid.NewGuid():N}.tmp";
+            File.WriteAllText(tempPath, System.Text.Json.JsonSerializer.Serialize(entries));
+            File.Move(tempPath, hiddenWindowsStatePath, overwrite: true);
         }
         catch (Exception ex)
         {
             App.WriteCrashLog(ex);
+        }
+        finally
+        {
+            if (tempPath is not null)
+            {
+                try { File.Delete(tempPath); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
         }
     }
 
@@ -1881,6 +2244,47 @@ public sealed class MainWindow : Window
 
     [DllImport("user32.dll")]
     private static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+
+    private delegate void WinEventProc(IntPtr hook, uint eventType, IntPtr windowHandle,
+        int objectId, int childId, uint threadId, uint eventTime);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SetWinEventHook(uint first, uint last, IntPtr module,
+        WinEventProc callback, uint processId, uint threadId, uint flags);
+
+    [DllImport("user32.dll")]
+    private static extern bool UnhookWinEvent(IntPtr hook);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetAncestor(IntPtr windowHandle, uint flags);
+
+    [DllImport("wtsapi32.dll")]
+    private static extern bool WTSRegisterSessionNotification(IntPtr window, uint flags);
+
+    [DllImport("wtsapi32.dll")]
+    private static extern bool WTSUnRegisterSessionNotification(IntPtr window);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ScreenPoint
+    {
+        public int X;
+        public int Y;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool GetCursorPos(out ScreenPoint point);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr CreatePopupMenu();
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool AppendMenu(IntPtr menu, uint flags, nuint item, string text);
+
+    [DllImport("user32.dll")]
+    private static extern uint TrackPopupMenu(IntPtr menu, uint flags, int x, int y, int reserved, IntPtr owner, IntPtr bounds);
+
+    [DllImport("user32.dll")]
+    private static extern bool DestroyMenu(IntPtr menu);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern uint RegisterWindowMessage(string lpString);

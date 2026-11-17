@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/WinUI3/Models/AppConfig.cs" Link="AppConfig.cs" />
+    <Compile Include="../../src/WinUI3/Models/ProtectedApp.cs" Link="ProtectedApp.cs" />
+    <Compile Include="../../src/WinUI3/Services/ISettingsStore.cs" Link="ISettingsStore.cs" />
+    <Compile Include="../../src/WinUI3/Services/JsonSettingsStore.cs" Link="JsonSettingsStore.cs" />
+    <Compile Include="../../src/WinUI3/Services/PinHasher.cs" Link="PinHasher.cs" />
+  </ItemGroup>
+</Project>

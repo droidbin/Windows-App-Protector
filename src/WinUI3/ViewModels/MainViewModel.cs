@@ -133,6 +133,43 @@ public class MainViewModel : ObservableObject
         !string.IsNullOrWhiteSpace(config.AppPinSalt) &&
         !string.IsNullOrWhiteSpace(config.AppPinHash);
 
+    public bool EnableLaunchGate => config.EnableLaunchGate;
+
+    internal (bool CustomPin, int Minutes, int? Start, int? End, bool RelockOnExit)? GetLaunchPolicy(ProtectedAppViewModel? item)
+    {
+        var app = item is null ? null : FindModel(item);
+        if (app is null || app.IsPackaged || ProtectionService.UsesWindowOnlyBlocking(app))
+            return null;
+        return (!string.IsNullOrEmpty(app.LaunchPinHash), app.LaunchAllowedMinutes,
+            app.LaunchLockStartMinute, app.LaunchLockEndMinute, app.LaunchRelockOnExit);
+    }
+
+    internal async Task SaveLaunchPolicyAsync(ProtectedAppViewModel item, bool useDefaultPin,
+        string newPin, int minutes, int? start, int? end, bool relockOnExit)
+    {
+        var app = FindModel(item);
+        if (app is null || GetLaunchPolicy(item) is null)
+            return;
+
+        if (useDefaultPin)
+        {
+            app.LaunchPinSalt = string.Empty;
+            app.LaunchPinHash = string.Empty;
+        }
+        else if (newPin.Length > 0)
+        {
+            (app.LaunchPinSalt, app.LaunchPinHash) = PinHasher.CreateHash(newPin);
+        }
+        app.LaunchAllowedMinutes = minutes;
+        app.LaunchLockStartMinute = start;
+        app.LaunchLockEndMinute = end;
+        app.LaunchRelockOnExit = relockOnExit;
+        if (await SaveAndResyncPolicyAsync())
+        {
+            StatusText = $"{app.Name} 실행 정책을 저장했습니다.";
+        }
+    }
+
     public ObservableCollection<HotkeySettingViewModel> Hotkeys { get; } = new()
     {
         new("show-window", "\uCC3D \uBCF4\uC774\uAE30/\uC228\uAE30\uAE30", "\uBC31\uADF8\uB77C\uC6B4\uB4DC \uC2E4\uD589 \uC911\uC778 \uC571 \uCC3D\uC744 \uC804\uD658\uD569\uB2C8\uB2E4.", "Ctrl+Alt+W"),
@@ -148,7 +185,7 @@ public class MainViewModel : ObservableObject
         }
 
         return config.ProtectedApps
-            .Where(app => app.Enabled)
+            .Where(app => app.Enabled && !ProtectionService.UsesWindowOnlyBlocking(app) && !config.EnableLaunchGate)
             .Select(GetExecutableName)
             .Where(name => !string.IsNullOrWhiteSpace(name))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -156,16 +193,8 @@ public class MainViewModel : ObservableObject
 
     public IReadOnlySet<string> GetLockedPackageFamilyNames()
     {
-        if (!LockRulesActive())
-        {
-            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        }
-
-        return config.ProtectedApps
-            .Where(app => app.Enabled && app.IsPackaged)
-            .Select(app => app.PackageFamilyName)
-            .Where(name => !string.IsNullOrWhiteSpace(name))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        // Package-family matching is performed by the service-managed session agent.
+        return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     }
 
     public async Task InitializeAsync()
@@ -175,6 +204,7 @@ public class MainViewModel : ObservableObject
         config.CloseToBackground = loaded.CloseToBackground;
         config.CloseAppsOnLock = loaded.CloseAppsOnLock;
         config.StartWithWindows = loaded.StartWithWindows;
+        config.EnableLaunchGate = loaded.EnableLaunchGate;
         config.IdleLockMinutes = loaded.IdleLockMinutes;
         config.UnlockMinutes = loaded.UnlockMinutes;
         config.UnlockUntil = null;
@@ -206,9 +236,10 @@ public class MainViewModel : ObservableObject
         RefreshApps();
         ValidateHotkeys();
         SyncStartupPreference();
-        await SyncProtectionRulesAsync();
-        await SaveAsync();
-        UpdateStatus();
+        if (await SyncProtectionRulesAsync())
+        {
+            UpdateStatus();
+        }
     }
 
     public async Task SetProtectionEnabledAsync(bool enabled)
@@ -224,8 +255,7 @@ public class MainViewModel : ObservableObject
 
         ProtectionEnabled = LockRulesActive();
         RefreshApps();
-        await SyncProtectionRulesAsync();
-        await SaveAsync();
+        if (!await SyncProtectionRulesAsync()) return;
         UpdateStatus();
         SetCloseResultStatus(closeResult);
     }
@@ -255,8 +285,7 @@ public class MainViewModel : ObservableObject
 
         var closeResult = await CloseAppsBeforeLockAsync(new[] { config.ProtectedApps[^1] });
         RefreshApps();
-        await SyncProtectionRulesAsync();
-        await SaveAsync();
+        if (!await SyncProtectionRulesAsync()) return;
         StatusText = $"\uD30C\uC77C \uCD94\uAC00\uB428: {Path.GetFileName(fullPath)}";
         SetCloseResultStatus(closeResult);
     }
@@ -297,8 +326,7 @@ public class MainViewModel : ObservableObject
 
         var closeResult = await CloseAppsBeforeLockAsync(new[] { config.ProtectedApps[^1] });
         RefreshApps();
-        await SyncProtectionRulesAsync();
-        await SaveAsync();
+        if (!await SyncProtectionRulesAsync()) return;
         StatusText = $"\uC124\uCE58 \uC571 \uCD94\uAC00\uB428: {app.Name}";
         SetCloseResultStatus(closeResult);
     }
@@ -331,8 +359,7 @@ public class MainViewModel : ObservableObject
 
         var closeResult = await CloseAppsBeforeLockAsync(new[] { config.ProtectedApps[^1] });
         RefreshApps();
-        await SyncProtectionRulesAsync();
-        await SaveAsync();
+        if (!await SyncProtectionRulesAsync()) return;
         StatusText = $"\uC124\uCE58 \uC571 \uCD94\uAC00\uB428: {app.Name}";
         SetCloseResultStatus(closeResult);
     }
@@ -354,8 +381,7 @@ public class MainViewModel : ObservableObject
         config.ProtectedApps.Remove(model);
         SelectedApp = null;
         RefreshApps();
-        await SyncProtectionRulesAsync();
-        await SaveAsync();
+        if (!await SyncProtectionRulesAsync()) return;
         StatusText = "\uC571\uC774 \uC0AD\uC81C\uB418\uC5C8\uC2B5\uB2C8\uB2E4.";
     }
 
@@ -383,20 +409,19 @@ public class MainViewModel : ObservableObject
             : null;
         model.Enabled = locking;
         RefreshApps();
-        await SyncProtectionRulesAsync();
-        await SaveAsync();
+        if (!await SyncProtectionRulesAsync()) return;
         StatusText = model.Enabled ? $"\uC7A0\uAE08 \uD65C\uC131\uD654: {model.Name}" : $"\uC7A0\uAE08 \uD574\uC81C: {model.Name}";
         SetCloseResultStatus(closeResult);
     }
 
-    public async Task SetListedAppsEnabledAsync(bool enabled)
+    public async Task SetListedAppsEnabledAsync(bool enabled, bool closeRunningApps = true)
     {
         if (!enabled)
         {
             autoLockSuppressedUntilActive = true;
         }
 
-        ProtectedAppProcessCloseResult? closeResult = enabled
+        ProtectedAppProcessCloseResult? closeResult = enabled && closeRunningApps
             ? await CloseAppsBeforeLockAsync(config.ProtectedApps)
             : null;
 
@@ -406,15 +431,15 @@ public class MainViewModel : ObservableObject
         }
 
         RefreshApps();
-        await SyncProtectionRulesAsync();
-        await SaveAsync();
+        if (!await SyncProtectionRulesAsync()) return;
         StatusText = enabled
             ? $"\uBAA9\uB85D \uC7A0\uAE08 \uC801\uC6A9: {config.ProtectedApps.Count}\uAC1C"
             : $"\uBAA9\uB85D \uC7A0\uAE08 \uD574\uC81C: {config.ProtectedApps.Count}\uAC1C";
         SetCloseResultStatus(closeResult);
     }
 
-    public async Task<bool> SavePreferencesAsync(bool closeToBackground, bool closeAppsOnLock, bool startWithWindows, int idleLockMinutes)
+    public async Task<bool> SavePreferencesAsync(bool closeToBackground, bool closeAppsOnLock,
+        bool startWithWindows, int idleLockMinutes, bool enableLaunchGate)
     {
         try
         {
@@ -423,7 +448,8 @@ public class MainViewModel : ObservableObject
             CloseAppsOnLock = closeAppsOnLock;
             StartWithWindows = startWithWindows;
             IdleLockMinutes = idleLockMinutes;
-            await SaveAsync();
+            config.EnableLaunchGate = enableLaunchGate;
+            if (!await SaveAndResyncPolicyAsync()) return false;
             StatusText = "\uC124\uC815\uC774 \uC800\uC7A5\uB418\uC5C8\uC2B5\uB2C8\uB2E4.";
             return true;
         }
@@ -462,8 +488,7 @@ public class MainViewModel : ObservableObject
         }
 
         RefreshApps();
-        await SyncProtectionRulesAsync();
-        await SaveAsync();
+        if (!await SyncProtectionRulesAsync()) return false;
         StatusText = $"\uC720\uD734 \uC0C1\uD0DC {config.IdleLockMinutes}\uBD84 \uACBD\uACFC\uB85C \uBAA9\uB85D\uC744 \uC790\uB3D9 \uC7A0\uAE08\uD588\uC2B5\uB2C8\uB2E4.";
         SetCloseResultStatus(closeResult);
         return true;
@@ -495,9 +520,18 @@ public class MainViewModel : ObservableObject
     public async Task SetAppPinAsync(string pin)
     {
         var hash = PinHasher.CreateHash(pin);
+        var previous = (config.AppPinSalt, config.AppPinHash);
         config.AppPinSalt = hash.Salt;
         config.AppPinHash = hash.Hash;
-        await SaveAsync();
+        try
+        {
+            await SaveAsync();
+        }
+        catch
+        {
+            (config.AppPinSalt, config.AppPinHash) = previous;
+            throw;
+        }
     }
 
     public bool VerifyAppPin(string pin)
@@ -563,20 +597,35 @@ public class MainViewModel : ObservableObject
         StatusText = $"\uB2E8\uCD95\uD0A4 \uB4F1\uB85D \uC2E4\uD328: {hotkey.DisplayName} ({hotkey.HotkeyText})";
     }
 
-    private async Task SyncProtectionRulesAsync()
+    private async Task<bool> SyncProtectionRulesAsync()
+    {
+        config.UnlockUntil = null;
+        config.ProtectionEnabled = LockRulesActive();
+        ProtectionEnabled = config.ProtectionEnabled;
+        return await SaveAndResyncPolicyAsync();
+    }
+
+    private async Task<bool> SaveAndResyncPolicyAsync()
     {
         try
         {
-            config.UnlockUntil = null;
-
-            config.ProtectionEnabled = LockRulesActive();
-            ProtectionEnabled = config.ProtectionEnabled;
             await SaveAsync();
-            await protectionService.SyncExecutionBlockRulesAsync(config.ProtectedApps);
         }
         catch (Exception ex)
         {
-            StatusText = $"\uC7A0\uAE08 \uADDC\uCE59 \uC801\uC6A9 \uC2E4\uD328: {ex.Message}";
+            StatusText = $"보호 정책을 저장할 수 없습니다: {ex.Message}";
+            return false;
+        }
+
+        try
+        {
+            await protectionService.RequestPolicyResyncAsync();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"보호 정책은 저장했지만 서비스에 적용하지 못했습니다: {ex.Message}";
+            return false;
         }
     }
 

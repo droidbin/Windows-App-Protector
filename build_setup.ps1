@@ -37,6 +37,13 @@ foreach ($required in @("hostfxr.dll", "coreclr.dll", "Microsoft.UI.Xaml.dll")) 
     if (!(Test-Path -LiteralPath (Join-Path $payloadSource $required))) { throw "Missing app-local runtime: $required" }
 }
 $serviceSource = Join-Path $root "src\Service\WindowsAppProtector.Service.cs"
+$productBrandSource = Join-Path $root "src\Shared\ProductBrand.cs"
+$launchServerSource = Join-Path $root "src\Service\LaunchAuthorizationServer.cs"
+$agentSupervisorSource = Join-Path $root "src\Service\SessionAgentSupervisor.cs"
+$agentSource = Join-Path $root "src\WindowAgent\Program.cs"
+$gateSource = Join-Path $root "src\LaunchGate\Program.cs"
+$gateProtocol = Join-Path $root "src\LaunchGate\GateProtocol.cs"
+$gateManifest = Join-Path $root "src\LaunchGate\app.manifest"
 $serviceBuildDir = Join-Path $root "build\service"
 $serviceExe = Join-Path $serviceBuildDir "WindowsAppProtector.Service.exe"
 $buildDir = Join-Path $root "build\installer"
@@ -65,18 +72,28 @@ if (!(Test-Path $csc)) {
     throw "csc.exe not found: $csc"
 }
 
-& $csc /nologo /target:exe /optimize+ /reference:System.ServiceProcess.dll /reference:System.Runtime.Serialization.dll /out:$serviceExe $serviceSource
+& $csc /nologo /target:exe /optimize+ /reference:System.ServiceProcess.dll /reference:System.Runtime.Serialization.dll /out:$serviceExe $serviceSource $launchServerSource $agentSupervisorSource $gateProtocol $productBrandSource
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
 Copy-Item -Path (Join-Path $payloadSource "*") -Destination $payloadDir -Recurse -Force
 Copy-Item -LiteralPath $serviceExe -Destination $payloadDir -Force
+$gateExe = Join-Path $payloadDir "WindowsAppProtector.Gate.exe"
+& $csc /nologo /target:winexe /platform:x64 /optimize+ /win32manifest:$gateManifest /win32icon:$icon /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /out:$gateExe $gateSource $gateProtocol $productBrandSource
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
+$agentExe = Join-Path $payloadDir "WindowsAppProtector.WindowAgent.exe"
+& $csc /nologo /target:winexe /platform:x64 /optimize+ /win32manifest:$gateManifest /win32icon:$icon /out:$agentExe $agentSource $gateProtocol
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
 $payloadAssetsDir = Join-Path $payloadDir "Assets"
 New-Item -ItemType Directory -Path $payloadAssetsDir -Force | Out-Null
 Copy-Item -LiteralPath $icon -Destination (Join-Path $payloadAssetsDir "AppIcon.ico") -Force
 
-& $csc /nologo /target:winexe /optimize+ /win32manifest:$manifest /win32icon:$icon /reference:System.IO.Compression.FileSystem.dll /out:$setupExe $setupSource
+& $csc /nologo /target:winexe /optimize+ /win32manifest:$manifest /win32icon:$icon /reference:System.IO.Compression.FileSystem.dll /out:$setupExe $setupSource $productBrandSource
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
