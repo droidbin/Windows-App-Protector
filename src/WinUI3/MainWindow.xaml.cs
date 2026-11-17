@@ -33,8 +33,10 @@ public sealed class MainWindow : Window
     private const int WtsConsoleDisconnect = 0x2;
     private const int WtsRemoteDisconnect = 0x4;
     private const int WtsSessionLock = 0x7;
+    private const int WtsSessionUnlock = 0x8;
     private const int PowerSuspend = 0x4;
     private const int PowerResumeAutomatic = 0x12;
+    private const uint CursorShowing = 0x00000001;
     private const uint EventSystemForeground = 0x0003;
     private const uint EventObjectShow = 0x8002;
     private const uint WinEventSkipOwnProcess = 0x0002;
@@ -70,6 +72,7 @@ public sealed class MainWindow : Window
     private static readonly TimeSpan MaxPinLockout = TimeSpan.FromMinutes(15);
     private const string MessageWindowClassName = "WindowsAppProtectorMessageWindow";
     private static readonly IntPtr IdiApplication = new(32512);
+    private static readonly IntPtr IdcArrow = new(32512);
 
     private readonly ListView appList = new() { SelectionMode = ListViewSelectionMode.Multiple };
     private readonly Dictionary<int, string> registeredHotkeys = new();
@@ -737,6 +740,12 @@ public sealed class MainWindow : Window
 
     private IntPtr MessageWndProc(IntPtr windowHandle, uint message, IntPtr wParam, IntPtr lParam)
     {
+        if ((message == WmWtsSessionChange && wParam.ToInt64() == WtsSessionUnlock) ||
+            (message == WmPowerBroadcast && wParam.ToInt64() == PowerResumeAutomatic))
+        {
+            App.WriteProtectionLog($"{(message == WmWtsSessionChange ? "session-unlock" : "power-resume")} cursor={GetCursorVisibilityForLog()}");
+        }
+
         if ((message == WmWtsSessionChange && wParam.ToInt64() is WtsConsoleDisconnect or WtsRemoteDisconnect or WtsSessionLock) ||
             (message == WmPowerBroadcast && wParam.ToInt64() is PowerSuspend or PowerResumeAutomatic))
         {
@@ -779,6 +788,17 @@ public sealed class MainWindow : Window
         }
 
         return DefWindowProc(windowHandle, message, wParam, lParam);
+    }
+
+    private static string GetCursorVisibilityForLog()
+    {
+        var cursorInfo = new CursorInfo
+        {
+            cbSize = (uint)Marshal.SizeOf<CursorInfo>(),
+        };
+        return GetCursorInfo(ref cursorInfo)
+            ? (cursorInfo.flags & CursorShowing) != 0 ? "visible" : "hidden"
+            : "unknown";
     }
 
     private async Task RelockForSystemEventAsync()
@@ -948,6 +968,9 @@ public sealed class MainWindow : Window
             cbSize = (uint)Marshal.SizeOf<WindowClassEx>(),
             lpfnWndProc = Marshal.GetFunctionPointerForDelegate(messageWndProcDelegate),
             hInstance = instance,
+            // This hidden top-level window receives session and power messages. Give it an
+            // explicit class cursor so a secure-desktop transition cannot leave its cursor null.
+            hCursor = LoadCursor(IntPtr.Zero, IdcArrow),
             lpszClassName = MessageWindowClassName,
         };
 
@@ -2133,6 +2156,15 @@ public sealed class MainWindow : Window
         public uint dwTime;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CursorInfo
+    {
+        public uint cbSize;
+        public uint flags;
+        public IntPtr hCursor;
+        public ScreenPoint screenPosition;
+    }
+
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private sealed class OpenFileName
     {
@@ -2209,6 +2241,9 @@ public sealed class MainWindow : Window
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr LoadIcon(IntPtr hInstance, IntPtr lpIconName);
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr LoadCursor(IntPtr hInstance, IntPtr lpCursorName);
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr LoadImage(
         IntPtr hInstance,
@@ -2273,6 +2308,9 @@ public sealed class MainWindow : Window
 
     [DllImport("user32.dll")]
     private static extern bool GetCursorPos(out ScreenPoint point);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetCursorInfo(ref CursorInfo cursorInfo);
 
     [DllImport("user32.dll")]
     private static extern IntPtr CreatePopupMenu();
